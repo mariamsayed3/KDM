@@ -79,10 +79,15 @@ class HSIDataset(Dataset):
         elif self.dataset == 'dental':
             bmp_file = self.root_dir + self.training_imgs[index] + '_masks.tif'
             raw_file = self.root_dir + self.training_imgs[index] + '.tif'
+            print("understanding bmp_file")
+            print(bmp_file)
+            print("understanding raw_file")
+            print(raw_file)
         else:
             bmp_file = self.root_dir + self.training_imgs[index]
             raw_file = self.root_dir + self.training_imgs[index][:-4] + '.raw'
 
+        assert False
         #import os
         #print(os.listdir('D:/Users/vmhp806/data/HSI/UOW-HSI'))
         # Read the hsi image
