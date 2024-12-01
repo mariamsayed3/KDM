@@ -69,6 +69,7 @@ class HSIDataset(Dataset):
                 + y_oht: one-hot coding of the ground-truth image of size (n_classes, H, W)
         """
         from utils.utils import hsi_read_data
+        ## Get the paths of the data
         # Get the ground truth and raw files
         if self.dataset == 'brain':
             bmp_file = self.root_dir + self.training_imgs[index] + "/" + self.training_imgs[index] + '/gtMap.hdr'
@@ -79,6 +80,10 @@ class HSIDataset(Dataset):
         elif self.dataset == 'dental':
             bmp_file = self.root_dir + self.training_imgs[index] + '_masks.tif'
             raw_file = self.root_dir + self.training_imgs[index] + '.tif'
+            print("understanding root")
+            print(self.root_dir)
+            print("training image")
+            print(self.training_imgs)
             print("understanding bmp_file")
             print(bmp_file)
             print("understanding raw_file")
