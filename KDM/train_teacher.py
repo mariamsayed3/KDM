@@ -111,19 +111,19 @@ def main(cfg, comet):
     train_loader, val_loader, test_loader = get_experiment_dataloaders(cfg['train_params'])
     #
     # # Log the trainable parameters
-    x = test_loader.dataset[0]['input'].unsqueeze(0)
-    if 'cuda' in device.type:
-        x = x.to('cuda:0')
-    # print(model.device)
-    # print(x.device)
-    flops, params = profile(model.to('cuda:0'), inputs=(x.to('cuda:0'),), verbose=False)
-    macs, params = clever_format([flops, params], "%.3f")
-    print("FLOPS: {}, PARAMS: {}".format(flops, params))
-    comet.log_other('Model trainable parameters', params)
-    comet.log_other('Floating point operations per second (FLOPS)', flops)
-    comet.log_other('Multiply accumulates per second (MACs)', macs)
+    # x = test_loader.dataset[0]['input'].unsqueeze(0)
+    # if 'cuda' in device.type:
+    #     x = x.to('cuda:0')
+    # # print(model.device)
+    # # print(x.device)
+    # flops, params = profile(model.to('cuda:0'), inputs=(x.to('cuda:0'),), verbose=False)
+    # macs, params = clever_format([flops, params], "%.3f")
+    # print("FLOPS: {}, PARAMS: {}".format(flops, params))
+    # comet.log_other('Model trainable parameters', params)
+    # comet.log_other('Floating point operations per second (FLOPS)', flops)
+    # comet.log_other('Multiply accumulates per second (MACs)', macs)
 
-    model = torch.nn.DataParallel(model).cuda()
+    # model = torch.nn.DataParallel(model).cuda()
     model = model.to(device)
 
     # Define an optimiser
@@ -167,7 +167,7 @@ def main(cfg, comet):
 
     # testing(model, m_params['classes'], test_loader, metric, device,
     #        m_params['n_heads'], comet, cfg['train_params']['save_dir'])
-    test_running_time_with_wrapper(x, model, comet, m_params['n_heads'])
+    #test_running_time_with_wrapper(x, model, comet, m_params['n_heads'])
     comet.log_asset(cfg['train_params']['save_dir'] + '/best_model.pth')
 
 

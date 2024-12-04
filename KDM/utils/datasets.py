@@ -12,7 +12,8 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 # from mpl_toolkits.axes_grid1 import make_axes_locatable
 from spectral import *
-from . import tiff
+#from . import tiff
+import os
 
 # Third party imports
 import torch
@@ -71,76 +72,24 @@ class HSIDataset(Dataset):
         from utils.utils import hsi_read_data
         ## Get the paths of the data
         # Get the ground truth and raw files
-        if self.dataset == 'brain':
-            bmp_file = self.root_dir + self.training_imgs[index] + "/" + self.training_imgs[index] + '/gtMap.hdr'
-            raw_file = self.root_dir + self.training_imgs[index] + "/" + self.training_imgs[index] + '/raw.hdr'
-        elif self.dataset == 'pathology':
-            bmp_file = self.root_dir + 'Mask/' + self.training_imgs[index] + '.png'
-            raw_file = self.root_dir + 'MHSI/' + 'MHSI/' + self.training_imgs[index] + '.hdr'
-        elif self.dataset == 'dental':
-            bmp_file = self.root_dir + self.training_imgs[index] + '_masks.tif'
-            raw_file = self.root_dir + self.training_imgs[index] + '.tif'
-            print("understanding root")
-            print(self.root_dir)
-            print("training image")
-            print(self.training_imgs)
-            print("understanding bmp_file")
-            print(bmp_file)
-            print("understanding raw_file")
-            print(raw_file)
-        else:
-            bmp_file = self.root_dir + self.training_imgs[index]
-            raw_file = self.root_dir + self.training_imgs[index][:-4] + '.raw'
-
-        assert False
-        #import os
-        #print(os.listdir('D:/Users/vmhp806/data/HSI/UOW-HSI'))
+        bmp_file = self.root_dir + self.training_imgs[index] + '_mask.npy'
+        raw_file = self.root_dir + self.training_imgs[index] + '_raw.npy'
+        if not os.path.exists(raw_file) or not os.path.exists(bmp_file):
+            raise FileNotFoundError(f"File not found: {raw_file} or {bmp_file}")
         # Read the hsi image
-        if self.dataset == 'brain':
-            x = envi.open(raw_file, image=raw_file[:-4])[:, :, :]
-            chosen_channels = np.linspace(0, x.shape[2] - 1, num=300, dtype=int)
-            new_x = [x[:, :, channel] for channel in chosen_channels]
-            x = np.stack(new_x, axis=2)
-        elif self.dataset == 'pathology':
-            x = envi.open(raw_file, image=raw_file[:-4]+'.img')[:, :, :]
-        elif self.dataset == 'dental':
-            x, _, _, _ = tiff.read_stiff(raw_file)
-            x = cv2.resize(x, (250, 250), interpolation=cv2.INTER_NEAREST)
-            chosen_channels = np.linspace(0, x.shape[2]-1, num=51, dtype=int)
-            new_x = [x[:, :, channel] for channel in chosen_channels]
-            x = np.stack(new_x, axis=2)
-        else:
-            x, _ = hsi_read_data(raw_file)  # of size (H, W, n_bands)
+        x = np.load(raw_file)[:32, :32, :]
+        #x = spectral.Image(x)
+        if len(x.shape) != 3:
+            raise ValueError(f"HSI image does not have 3 dimensions, got {x.shape}")
         x = np.moveaxis(x, [0, 1, 2], [1, 2, 0])    # of size (n_bands, H, W)
         x = np.float32(x)                           # convert the input data into float32 datatype
-        # x = x[:30,:50,:50]
-
         # Read the ground-truth image
-        if self.dataset == 'brain':
-            mask = envi.open(bmp_file, image=bmp_file[:-4])[:, :, 0]
-            y_seg = np.squeeze(mask)
-            y_seg = y_seg.astype(np.float32)
-        elif self.dataset == 'pathology':
-            bmp = (cv2.imread(bmp_file, 0) / 255).astype(np.uint8)
-            y_seg = bmp
-            # y_seg = np.array(bmp.getdata()).reshape(bmp.size[1], bmp.size[0]) / 255
-        elif self.dataset == 'dental':
-            masks = tiff.read_mtiff(bmp_file)
-            y_seg = tiff.mtiff_to_2d_arr(masks)
-            y_seg = cv2.resize(y_seg, (250, 250), interpolation=cv2.INTER_NEAREST)
-        else:
-            bmp = Image.open(bmp_file)
-            y_seg = np.array(bmp.getdata()).reshape(bmp.size[1], bmp.size[0])   # of size (H, W)
-
-        # y_seg = y_seg[:50,:50]
-        #y_seg[y_seg == 4] = 0
+        y_seg = np.load(bmp_file)[:32,:32]
         y_oht = convert_seg2onehot(y_seg, self.classes)                     # of size (n_classes, H, W)
-
         # Convert the images into Pytorch tensors
         x = torch.Tensor(x)                                 # of size (n_bands, H, W)
         y_seg = torch.as_tensor(y_seg, dtype=torch.long)    # of size (H, W)
         y_oht = torch.as_tensor(y_oht, dtype=torch.float32)	# of size (n_classes, H, W)
-
         return {'input': x, 'ground_truth_onehot': y_oht, 'ground_truth_seg': y_seg, 'name': self.training_imgs[index][:-4]}
 
     def get_palette(self,n, color_map_by_label):
