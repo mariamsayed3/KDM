@@ -77,14 +77,14 @@ class HSIDataset(Dataset):
         if not os.path.exists(raw_file) or not os.path.exists(bmp_file):
             raise FileNotFoundError(f"File not found: {raw_file} or {bmp_file}")
         # Read the hsi image
-        x = np.load(raw_file)[:32, :32, :]
+        #x = np.load(raw_file)[:32, :32]
         #x = spectral.Image(x)
         if len(x.shape) != 3:
             raise ValueError(f"HSI image does not have 3 dimensions, got {x.shape}")
         x = np.moveaxis(x, [0, 1, 2], [1, 2, 0])    # of size (n_bands, H, W)
         x = np.float32(x)                           # convert the input data into float32 datatype
         # Read the ground-truth image
-        y_seg = np.load(bmp_file)[:32,:32]
+        #y_seg = np.load(bmp_file)[:32,:32]
         y_oht = convert_seg2onehot(y_seg, self.classes)                     # of size (n_classes, H, W)
         # Convert the images into Pytorch tensors
         x = torch.Tensor(x)                                 # of size (n_bands, H, W)

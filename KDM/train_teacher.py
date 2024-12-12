@@ -107,6 +107,7 @@ def main(cfg, comet):
 
     # Get dataloaders
     t_params = cfg['train_params']
+    print('t_paramaters: ', t_params)
     t_params['classes'] = m_params['classes']
     train_loader, val_loader, test_loader = get_experiment_dataloaders(cfg['train_params'])
     #
@@ -262,6 +263,7 @@ def val_epoch(model, val_loader, loss_fn, metric, device, classes=[0, 1, 2, 3, 4
             x, y_oht, y_seg = minibatch['input'], minibatch['ground_truth_onehot'], \
                 minibatch['ground_truth_seg']
             x = x.to(device)  # of size (batchsize, n_bands, H, W)
+            
             y_seg = y_seg.to(device)  # of size (batchsize, 1, H, W)
             y_oht = y_oht.to(device)  # of size (batchsize, n_classes, H, W)
 

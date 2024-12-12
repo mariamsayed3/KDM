@@ -326,6 +326,13 @@ def get_experiment_dataloaders(cfg):
     :return: train, validation, and test dataloaders
     """
     # Create an instance of the HSIDataset
+
+    print('dataset_dir ',cfg['dataset_dir'])
+    print('train_txtfiles ',cfg['train_txtfiles'])
+    print('classes ',cfg['classes'])
+    print('n_cutoff_imgs ',cfg['n_cutoff_imgs'])
+    print('dataset ',cfg['dataset'])
+
     hsi_train_dataset = HSIDataset(cfg['dataset_dir'], cfg['train_txtfiles'],
                                    cfg['classes'], cfg['n_cutoff_imgs'], cfg['dataset'])
 
