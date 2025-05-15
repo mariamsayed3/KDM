@@ -26,10 +26,11 @@ import torch.nn.functional as F
 import utils.losses
 import utils.metrics
 import models.hsi_net
+from utils.metrics import DynamicClassMetrics
 from utils.utils import (create_exp_dir, test_running_time_with_wrapper, 
                         init_obj, compute_confusion_matrix_dynamic, 
                         compute_eval_from_cm_robust, ClassTracker,
-                        DynamicClassMetrics, TrainerWithDynamicClasses)
+                         TrainerWithDynamicClasses)
 from utils.datasets import get_spatial_transcriptomics_dataloaders
 
 

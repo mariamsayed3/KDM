@@ -468,8 +468,8 @@ class NLLLoss(nn.NLLLoss, base.Loss):
     pass
 
 
-class NLLLoss2d(nn.NLLLoss2d, base.Loss):
-    pass
+# class NLLLoss2d(nn.NLLLoss2d, base.Loss):
+#     pass
 
 
 class BCELoss(nn.BCELoss, base.Loss):

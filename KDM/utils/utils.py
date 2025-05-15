@@ -581,6 +581,216 @@ def show_visual_results_dynamic(x, y_gt, y_pr, available_classes, all_classes=No
     if comet is not None:
         comet.log_figure(figure_name=fig_name, figure=fig)
 
+class TrainerWithDynamicClasses:
+    """Training utilities for spatial transcriptomics with dynamic classes"""
+    
+    def __init__(self, model, optimizer, loss_fn, device='cuda', ignore_index=0):
+        """
+        Initialize trainer with dynamic class support
+        
+        Args:
+            model: The neural network model to train
+            optimizer: Optimizer for training
+            loss_fn: Loss function (should support ignore_index)
+            device: Device to run training on ('cuda' or 'cpu')
+            ignore_index: Index to ignore in loss calculation (default: 0)
+        """
+        self.model = model
+        self.optimizer = optimizer
+        self.loss_fn = loss_fn
+        self.device = device
+        self.ignore_index = ignore_index
+        
+        # Metrics tracking
+        self.train_metrics = DynamicClassMetrics(ignore_index=ignore_index)
+        self.val_metrics = DynamicClassMetrics(ignore_index=ignore_index)
+        
+        # Class tracking across training
+        self.global_class_tracker = {}
+        
+    def train_epoch(self, dataloader, epoch):
+        """
+        Train for one epoch with dynamic class tracking
+        
+        Args:
+            dataloader: Training dataloader
+            epoch: Current epoch number
+            
+        Returns:
+            dict: Training metrics for this epoch
+        """
+        self.model.train()
+        self.train_metrics.reset()
+        
+        total_loss = 0.0
+        pbar = tqdm(dataloader, ncols=80, desc=f'Training Epoch {epoch+1}')
+        
+        for batch_idx, batch in enumerate(pbar):
+            # Get batch data
+            inputs = batch['input'].to(self.device)
+            targets = batch['ground_truth_seg'].to(self.device)
+            sample_ids = batch.get('name', [f'batch_{batch_idx}_sample_{i}' for i in range(inputs.size(0))])
+            
+            # Forward pass
+            self.optimizer.zero_grad()
+            
+            # Handle different model outputs (some return features + outputs)
+            model_output = self.model(inputs)
+            if isinstance(model_output, tuple):
+                # If model returns (features, outputs) or (features, outputs_list)
+                features, outputs = model_output
+                # Take the last output if it's a list (for multi-head models)
+                if isinstance(outputs, list):
+                    outputs = outputs[-1]
+            else:
+                # Single output
+                outputs = model_output
+            
+            # Compute loss
+            if targets.dim() == 4:
+                targets = targets.squeeze(1)  # Remove channel dimension if present
+            
+            loss = self.loss_fn(outputs, targets)
+            loss.backward()
+            self.optimizer.step()
+            
+            total_loss += loss.item()
+            
+            # Update metrics with dynamic class tracking
+            self.train_metrics.update(outputs, targets, sample_ids, probabilities=True)
+            
+            # Track classes for this epoch
+            for i, sample_id in enumerate(sample_ids):
+                sample_classes = set(np.unique(targets[i].cpu().numpy())) - {self.ignore_index}
+                if sample_id not in self.global_class_tracker:
+                    self.global_class_tracker[sample_id] = sample_classes
+                else:
+                    self.global_class_tracker[sample_id].update(sample_classes)
+            
+            # Update progress bar
+            pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+        
+        # Compute metrics for this epoch
+        metrics = self.train_metrics.compute_metrics()
+        metrics['loss'] = total_loss / len(dataloader)
+        
+        return metrics
+    
+    def validate(self, dataloader):
+        """
+        Validate with dynamic class tracking
+        
+        Args:
+            dataloader: Validation dataloader
+            
+        Returns:
+            dict: Validation metrics
+        """
+        self.model.eval()
+        self.val_metrics.reset()
+        
+        total_loss = 0.0
+        pbar = tqdm(dataloader, ncols=80, desc='Validating')
+        
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(pbar):
+                # Get batch data
+                inputs = batch['input'].to(self.device)
+                targets = batch['ground_truth_seg'].to(self.device)
+                sample_ids = batch.get('name', [f'val_batch_{batch_idx}_sample_{i}' for i in range(inputs.size(0))])
+                
+                # Forward pass
+                model_output = self.model(inputs)
+                if isinstance(model_output, tuple):
+                    features, outputs = model_output
+                    if isinstance(outputs, list):
+                        outputs = outputs[-1]
+                else:
+                    outputs = model_output
+                
+                # Compute loss
+                if targets.dim() == 4:
+                    targets = targets.squeeze(1)
+                    
+                loss = self.loss_fn(outputs, targets)
+                total_loss += loss.item()
+                
+                # Update metrics
+                self.val_metrics.update(outputs, targets, sample_ids, probabilities=True)
+                
+                # Update progress bar
+                pbar.set_postfix({'Loss': f'{loss.item():.4f}'})
+        
+        # Compute metrics for this epoch
+        metrics = self.val_metrics.compute_metrics()
+        metrics['loss'] = total_loss / len(dataloader)
+        
+        return metrics
+    
+    def get_class_distribution_summary(self):
+        """
+        Get summary of class distribution across all samples
+        
+        Returns:
+            dict: Summary of classes and their distribution
+        """
+        all_classes = set()
+        class_frequency = {}
+        
+        for sample_id, classes in self.global_class_tracker.items():
+            all_classes.update(classes)
+            for cls in classes:
+                class_frequency[cls] = class_frequency.get(cls, 0) + 1
+        
+        return {
+            'all_classes': sorted(list(all_classes)),
+            'class_frequency': class_frequency,
+            'total_samples': len(self.global_class_tracker),
+            'samples_per_class': {cls: count for cls, count in class_frequency.items()}
+        }
+    
+    def save_checkpoint(self, epoch, best_metric, save_path):
+        """
+        Save training checkpoint
+        
+        Args:
+            epoch: Current epoch
+            best_metric: Best validation metric so far
+            save_path: Path to save checkpoint
+        """
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'best_metric': best_metric,
+            'class_tracker': self.global_class_tracker
+        }
+        torch.save(checkpoint, save_path)
+    
+    def load_checkpoint(self, checkpoint_path):
+        """
+        Load training checkpoint
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+            
+        Returns:
+            dict: Loaded checkpoint data
+        """
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.global_class_tracker = checkpoint.get('class_tracker', {})
+        return checkpoint
+    
+    def get_learning_rate(self):
+        """Get current learning rate"""
+        return self.optimizer.param_groups[0]['lr']
+    
+    def set_learning_rate(self, lr):
+        """Set learning rate for all parameter groups"""
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
 
 # Usage example for dynamic class handling
 class ClassTracker:

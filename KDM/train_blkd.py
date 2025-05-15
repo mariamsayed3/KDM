@@ -18,12 +18,14 @@ import torch
 from tqdm import tqdm
 from thop import profile, clever_format
 import torch.nn.functional as F
+from models.hsi_net import HSINet, Res_SGR_Net, SpatialTranscriptomics_SGR_Net
+
 
 # Local application imports
 import utils.losses
 import utils.metrics
 import models.hsi_net
-from models.hsi_net import HSINet, SGR_Net
+from models.hsi_net import HSINet, Res_SGR_Net, SpatialTranscriptomics_SGR_Net
 from utils.utils import (create_exp_dir, init_obj, test_running_time,
                         compute_confusion_matrix_dynamic, compute_eval_from_cm_robust,
                         ClassTracker, DynamicClassMetrics, show_visual_results_dynamic)

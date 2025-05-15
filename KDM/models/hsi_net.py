@@ -749,18 +749,33 @@ class SpatialTranscriptomics_SGR_Net(Res_SGR_Net):
     """
     def __init__(self, cell_types=[1, 2, 3, 4, 5],  # Only active classes
                  n_genes=136, encoder_name='resnet50', 
-                 ignore_index=0, **kwargs):
+                 ignore_index=0, 
+                 nf_enc=[64, 128, 256, 512, 1024],
+                 nf_dec=[64, 32, 32, 16, 16, 8], 
+                 do_batchnorm=True, 
+                 max_norm_val=None, 
+                 n_heads=5,
+                 **kwargs):
         
-        # Include ignore_index for architecture (total 6 classes) but only train on active classes
+        # Include ignore_index for architecture (total 6 classes)
         all_classes = [ignore_index] + cell_types  # [0, 1, 2, 3, 4, 5]
         
-        # Initialize with correct parameters
-        super().__init__(classes=all_classes, n_bands=n_genes, encoder_name=encoder_name, **kwargs)
+        # Initialize parent class with explicit parameters
+        super().__init__(
+            classes=all_classes,
+            n_bands=n_genes,  # Map n_genes to n_bands
+            nf_enc=nf_enc,
+            nf_dec=nf_dec,
+            do_batchnorm=do_batchnorm,
+            max_norm_val=max_norm_val,
+            n_heads=n_heads,
+            encoder_name=encoder_name
+        )
         
         # Update parameters
         self.n_genes = n_genes
-        self.cell_types = cell_types  # Active classes [1, 2, 3, 4, 5]
-        self.all_classes = all_classes  # All classes including ignore [0, 1, 2, 3, 4, 5]
+        self.cell_types = cell_types
+        self.all_classes = all_classes
         self.ignore_index = ignore_index
         
         # Add ignore layer
