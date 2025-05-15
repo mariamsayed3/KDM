@@ -1,0 +1,72 @@
+# spatial_transcriptomics_blkd.yml  
+# Configuration for block knowledge distillation
+
+name: 'spatial_transcriptomics_blkd'
+seed: 42
+
+# Global parameters
+dataset: 'spatial_transcriptomics'
+gpu_id: [0]
+
+train_params:
+  dataset: 'spatial_transcriptomics'
+  dataset_dir: 'C:/Users/maria/Documents/Masters_24/New_Models/KDM_Model/KDM/bioDataset3'  # Update this path
+  batch_size: 16
+  n_epochs: 100  # Will be divided by n_heads for progressive training
+  num_workers: 4
+  save_dir: ''  # Will be auto-generated with timestamp
+  early_stop: 25
+  ignore_index: 0
+
+# Teacher model configuration (multi-head, pre-trained)
+teacher_params:
+  name: 'SGR_Net'  # Multi-head teacher
+  n_bands: 136
+  classes: null  # Auto-detect classes
+  n_heads: 5  # Number of heads for block distillation
+  nf_enc: [64, 128, 256, 512, 1024]
+  nf_dec: [64, 32, 32, 16, 16, 8]
+  do_batchnorm: true
+  encoder_name: 'resnet50'
+  rates: [1, 2, 3, 4]  # Dilation rates for SGR_Net
+  
+  # Path to pre-trained multi-head teacher
+  pretrained_file: 'experiments/spatial_transcriptomics_teacher-[timestamp]/best_model.pth'
+  
+  ignore_index: 0
+
+# Student model configuration (single head)
+student_params:
+  name: 'HSINet'  # Single-head student
+  n_bands: 136
+  classes: null  # Auto-detect classes
+  nf_enc: [32, 64, 128, 256]  # Smaller than teacher
+  nf_dec: [32, 32, 16, 16, 8, 8]
+  do_batchnorm: true
+  
+  # Block knowledge distillation weights
+  feat_weight: 0.5     # Feature distillation weight
+  resp_weight: 0.5     # Response distillation weight
+  temperature: 3.0     # Slightly lower temperature for block KD
+  
+  ignore_index: 0
+
+optimizer:
+  type: 'Adam'
+  args:
+    lr: 0.0001
+    weight_decay: 0.00001
+
+# Block knowledge distillation loss
+loss: 'KnowledgeDistillationLoss'  # Supports progressive head distillation
+
+# Metrics with auto-class detection
+metric: 'MeanIoU'
+
+# Resume training if needed
+resume: false
+
+tags:
+  - 'spatial_transcriptomics'
+  - 'block_knowledge_distillation'
+  - 'progressive_learning'

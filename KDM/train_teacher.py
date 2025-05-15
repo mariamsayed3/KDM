@@ -1,13 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Created on 18/08/2020 7:41 pm
-
-@author: Hieu Phan, UOW
+Updated train_teacher.py for spatial transcriptomics with dynamic class handling
 """
 # Standard library imports
 import os
 import time
-
 import pandas as pd
 import yaml
 import argparse
@@ -15,13 +12,11 @@ import numpy as np
 import matplotlib
 from matplotlib import pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
-
 matplotlib.use('Agg')
 
 # Third party imports
 from comet_ml import Experiment
 import torch
-from torchsummary import summary
 from tqdm import tqdm
 from thop import profile, clever_format
 from torch.optim.lr_scheduler import StepLR
@@ -30,520 +25,316 @@ import torch.nn.functional as F
 # Local application imports
 import utils.losses
 import utils.metrics
-
 import models.hsi_net
-from utils.utils import show_visual_results, create_exp_dir, test_running_time_with_wrapper, \
-    get_experiment_dataloaders, init_obj, compute_confusion_matrix, compute_eval_from_cm
+from utils.utils import (create_exp_dir, test_running_time_with_wrapper, 
+                        init_obj, compute_confusion_matrix_dynamic, 
+                        compute_eval_from_cm_robust, ClassTracker,
+                        DynamicClassMetrics, TrainerWithDynamicClasses)
+from utils.datasets import get_spatial_transcriptomics_dataloaders
 
 
-def debug(cfg):
-    """
-    Set the network based on the configuration spicified in the .yml file
-    :param cfg: dict of parameters that are specified in the .yml config file
-    :param comet: comet logger object
-    :return:
-    """
-    # Set random seeds for reproducibility
-    init_seeds(cfg['seed'])
-
-    # Use GPU is available, otherwise use CPU
-    # device, n_gpu_ids = prepare_device()
-    device = torch.device('cuda:0')
-    # device = 'cpu'
-
-    # Create the model
-    m_params = cfg['model_params']
-    model = getattr(models.hsi_net, m_params['name'])(n_bands=m_params['n_bands'],
-                                                      classes=m_params['classes'],
-                                                      nf_enc=m_params['nf_enc'],
-                                                      nf_dec=m_params['nf_dec'],
-                                                      do_batchnorm=m_params['do_batchnorm'],
-                                                      # asp_ocr=m_params['asp'],
-                                                      n_heads=m_params['n_heads'],
-                                                      max_norm_val=None,
-                                                      encoder_name=m_params['encoder_name'])
-
-    # Get dataloaders
-    t_params = cfg['train_params']
-    t_params['classes'] = m_params['classes']
-    train_loader, val_loader, test_loader = get_experiment_dataloaders(cfg['train_params'])
-    profile(model.to('cuda:0'), inputs=(test_loader.dataset[0]['input'].unsqueeze(0).to('cuda:0'),), verbose=False)
-
-    model = torch.nn.DataParallel(model).cuda()
-    model = model.to(device)
-    saved = torch.load(cfg['train_params']['save_dir'] + '/best_model.pth')
-    model.load_state_dict(saved)
-    print("finish loading model")
-
-
-# ------------------------------------------------------------------------------
-# Auxiliary functions
-# ------------------------------------------------------------------------------
 def main(cfg, comet):
     """
-    Set the network based on the configuration spicified in the .yml file
-    :param cfg: dict of parameters that are specified in the .yml config file
-    :param comet: comet logger object
-    :return:
+    Set the network based on the configuration specified in the .yml file
+    Enhanced for spatial transcriptomics with dynamic class handling
     """
     # Set random seeds for reproducibility
     init_seeds(cfg['seed'])
-
-    # Use GPU is available, otherwise use CPU
-    # device, n_gpu_ids = prepare_device()
+    
     device = torch.device('cuda:0')
-    # device = 'cpu'
-
+    
     # Create the model
     m_params = cfg['model_params']
-    model = getattr(models.hsi_net, m_params['name'])(n_bands=m_params['n_bands'],
-                                                      classes=m_params['classes'],
-                                                      nf_enc=m_params['nf_enc'],
-                                                      nf_dec=m_params['nf_dec'],
-                                                      do_batchnorm=m_params['do_batchnorm'],
-                                                      n_heads=m_params['n_heads'],
-                                                      max_norm_val=None,
-                                                      encoder_name=m_params['encoder_name'])
-
-    # Get dataloaders
-    t_params = cfg['train_params']
-    print('t_paramaters: ', t_params)
-    t_params['classes'] = m_params['classes']
-    train_loader, val_loader, test_loader = get_experiment_dataloaders(cfg['train_params'])
-    #
-    # # Log the trainable parameters
-    # x = test_loader.dataset[0]['input'].unsqueeze(0)
-    # if 'cuda' in device.type:
-    #     x = x.to('cuda:0')
-    # # print(model.device)
-    # # print(x.device)
-    # flops, params = profile(model.to('cuda:0'), inputs=(x.to('cuda:0'),), verbose=False)
-    # macs, params = clever_format([flops, params], "%.3f")
-    # print("FLOPS: {}, PARAMS: {}".format(flops, params))
-    # comet.log_other('Model trainable parameters', params)
-    # comet.log_other('Floating point operations per second (FLOPS)', flops)
-    # comet.log_other('Multiply accumulates per second (MACs)', macs)
-
-    # model = torch.nn.DataParallel(model).cuda()
+    model = getattr(models.hsi_net, m_params['name'])(
+        n_bands=m_params['n_bands'],
+        classes=m_params['classes'],
+        nf_enc=m_params['nf_enc'],
+        nf_dec=m_params['nf_dec'],
+        do_batchnorm=m_params['do_batchnorm'],
+        n_heads=m_params['n_heads'],
+        max_norm_val=None,
+        encoder_name=m_params['encoder_name']
+    )
+    
+    # Get dataloaders for spatial transcriptomics
+    print("Loading spatial transcriptomics dataloaders...")
+    train_loader, val_loader, test_loader = get_spatial_transcriptomics_dataloaders(
+        data_dir=cfg['train_params']['dataset_dir'],
+        batch_size=cfg['train_params']['batch_size'],
+        num_workers=cfg['train_params']['num_workers']
+    )
+    
+    # Initialize class tracker for dynamic class handling
+    class_tracker = ClassTracker(ignore_index=0)
+    
+    # Log model parameters
+    x = test_loader.dataset[0]['input'].unsqueeze(0)
+    if 'cuda' in device.type:
+        x = x.to('cuda:0')
+    
+    flops, params = profile(model.to('cuda:0'), inputs=(x.to('cuda:0'),), verbose=False)
+    macs, params = clever_format([flops, params], "%.3f")
+    print("FLOPS: {}, PARAMS: {}".format(flops, params))
+    comet.log_other('Model trainable parameters', params)
+    comet.log_other('Floating point operations per second (FLOPS)', flops)
+    comet.log_other('Multiply accumulates per second (MACs)', macs)
+    
     model = model.to(device)
-
-    # Define an optimiser
-    print(f"Optimiser for model weights: {cfg['optimizer']['type']}")
+    
+    # Define optimizer
+    print(f"Optimizer for model weights: {cfg['optimizer']['type']}")
     optimizer = init_obj(cfg['optimizer']['type'],
-                         cfg['optimizer']['args'],
-                         torch.optim, model.parameters())
+                        cfg['optimizer']['args'],
+                        torch.optim, model.parameters())
+    
+    # Initialize loss function with spatial transcriptomics support
+    if cfg['loss'] == 'SpatialTranscriptomicsLoss':
+        loss_fn = utils.losses.SpatialTranscriptomicsLoss(
+            ignore_index=0,
+            ce_weight=m_params.get('ce_weight', 1.0),
+            dice_weight=m_params.get('dice_weight', 0.5),
+            focal_weight=m_params.get('focal_weight', 0.3)
+        )
+    else:
+        loss_fn = getattr(utils.losses, cfg['loss'])(
+            base_feat_w=m_params.get('feat_weight', 0.5),
+            base_resp_w=m_params.get('resp_weight', 0.5),
+            student_loss_w=m_params.get('student_weight', 1.0),
+            ignore_label=0
+        )
+    
+    # Initialize dynamic metrics
+    metrics = DynamicClassMetrics(ignore_index=0)
+    metric = getattr(utils.metrics, cfg['metric'])(ignore_index=0, activation='softmax2d')
+    
+    # Initialize trainer with dynamic classes
+    trainer = TrainerWithDynamicClasses(
+        model=model,
+        optimizer=optimizer,
+        loss_fn=loss_fn,
+        device=device,
+        ignore_index=0
+    )
+    
+    # Resume if needed
     best_performance = 0
     last_epoch = 0
     if cfg['resume']:
-        model_state_file = os.path.join(cfg['train_params']['save_dir'],
-                                        'checkpoint.pth.tar')
+        model_state_file = os.path.join(cfg['train_params']['save_dir'], 'checkpoint.pth.tar')
         if os.path.isfile(model_state_file):
             checkpoint = torch.load(model_state_file, map_location={'cuda:0': 'cpu'})
             best_performance = checkpoint['best_mIoU']
             last_epoch = checkpoint['epoch']
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint (epoch {})"
-                  .format(checkpoint['epoch']))
-
-    # Metrics
-    metric = getattr(utils.metrics, cfg['metric'])(activation='softmax2d')
-
-    # # Loss function
-    loss_fn = getattr(utils.losses, cfg['loss'])(base_feat_w=m_params['feat_weight'],
-                                                 base_resp_w=m_params['resp_weight'],
-                                                 student_loss_w=m_params['student_weight'],
-                                                 )
-
-    # Training
-    training(cfg['train_params'], optimizer, model, train_loader, val_loader,
-             loss_fn, metric, device, last_epoch, best_performance, comet)
-
+            print(f"=> loaded checkpoint (epoch {checkpoint['epoch']})")
+    
+    # Training with dynamic class handling
+    training_with_dynamic_classes(cfg['train_params'], trainer, train_loader, val_loader,
+                                 loss_fn, metric, device, last_epoch, best_performance, 
+                                 class_tracker, comet)
+    
     # Testing
     print("\nThe training has completed. Testing the model now...")
-
-    # Load the best model
     saved = torch.load(cfg['train_params']['save_dir'] + '/best_model.pth')
     model.load_state_dict(saved)
-
-    # testing(model, m_params['classes'], test_loader, metric, device,
-    #        m_params['n_heads'], comet, cfg['train_params']['save_dir'])
-    #test_running_time_with_wrapper(x, model, comet, m_params['n_heads'])
+    
+    # Enhanced testing with dynamic classes
+    testing_with_dynamic_classes(model, test_loader, metric, device, 
+                                m_params['n_heads'], comet, 
+                                cfg['train_params']['save_dir'], class_tracker)
+    
     comet.log_asset(cfg['train_params']['save_dir'] + '/best_model.pth')
 
 
-def train_epoch(optimizer, model, train_loader, loss_fn, metric, device, epoch, epoch_iters, max_iters):
-    """
-    Train an epoch for the dataset. Logic for training an epoch:
-        1. Get a minibatch for training
-        2. Compute the forward path
-        3. Compute the loss and update the weight
-        4. Evaluate train performance
-        5. Store the loss and metric
-        6. Display losses
-    :param optimizer: optimizer for the model
-    :param model: network model
-    :param train_loader: training dataloader
-    :param loss_fn: loss function for the model
-    :param metric: metric for computing the performance
-    :param device: device used for training (cpu or gpu)
-    :return: train the network model for the
-    """
-    cur_iters = epoch * epoch_iters
-    model.train()
-    pbar = tqdm(train_loader, ncols=80, desc='Training')
-    running_loss = 0
-    running_performance = 0
-    for step, minibatch in enumerate(pbar):
-        optimizer.zero_grad()  # clear the old gradients
-        # 1. Get a minibatch data for training
-        x, y_oht, y_seg = minibatch['input'], minibatch['ground_truth_onehot'], \
-            minibatch['ground_truth_seg']
-        x = x.to(device)  # of size (batchsize, n_bands, H, W)
-        y_seg = y_seg.to(device)  # of size (batchsize, 1, H, W)
-        # y_oht = y_oht.to(device)    # of size (batchsize, n_classes, H, W)
-
-        # 2. Compute the forward pass
-        f_results, o_results = model(x)  # of size (batchsize, n_classes, H, W
-
-        # 3. Compute loss, then update weights
-        loss_fn.update_kd_loss_params(iters=cur_iters + step, max_iters=max_iters)
-        if cfg['train_params']['dataset'] == "brain":
-            loss = loss_fn(f_results, o_results, y_seg, mask=True)
-        else:
-            loss = loss_fn(f_results, o_results, y_seg)
-        loss.backward()  # calculate gradients
-        optimizer.step()  # update weights
-
-        #         if cfg['train_params']['dataset'] == "brain":
-        #             o_results[:, 0] = 0
-
-        o_results = [F.interpolate(o, size=(y_seg.size(-2), y_seg.size(-1)), mode='nearest') for o in o_results]
-
-        #         if cfg['train_params']['dataset'] == "brain":
-        #             o_results[y_seg == 0] = 0
-
-        # 4. Evaluate train performance
-        performance = metric(o_results[-1], y_seg)
-
-        # 5. Store the loss and metric
-        running_loss = running_loss + loss.item()
-        running_performance = running_performance + performance.item()
-
-        # 6. Display losses
-        result = "{}: {:.4}".format('Train loss', loss)
-        pbar.set_postfix_str(result)
-
-    # Compute the average loss and performance
-    avg_loss = running_loss / len(train_loader)
-    avg_performance = running_performance / len(train_loader)
-
-    # Return the loss and performance (average-over-epoch values) of the training set
-    return avg_loss, avg_performance
-
-
-def val_epoch(model, val_loader, loss_fn, metric, device, classes=[0, 1, 2, 3, 4]):
-    """
-    Validation an epoch of validation set
-    :param model: network model
-    :param val_loader: validation dataloader
-    :param loss_fn: loss function for the model
-    :param metric: metric for computing the performance
-    :param device: device used for evaluation (cpu or gpu)
-    :return: average loss and performance of the validation set
-    """
-    model.eval()  # set model to eval mode
-    pbar = tqdm(val_loader, ncols=80, desc='Validating')
-    running_loss = 0
-    running_performance = 0
-    cm = 0
-    with torch.no_grad():  # declare no gradient operations
-        for step, minibatch in enumerate(pbar):
-            # 1. Get a minibatch data for validation
-            x, y_oht, y_seg = minibatch['input'], minibatch['ground_truth_onehot'], \
-                minibatch['ground_truth_seg']
-            x = x.to(device)  # of size (batchsize, n_bands, H, W)
-            
-            y_seg = y_seg.to(device)  # of size (batchsize, 1, H, W)
-            y_oht = y_oht.to(device)  # of size (batchsize, n_classes, H, W)
-
-            # 2. Compute the forward pass
-            f_results, o_results = model(x)  # of size (batchsize, n_classes, H, W)
-
-            #             if cfg['train_params']['dataset'] == "brain":
-            #                 hasLabel = (y_seg != 0).long()
-
-            # 3. Compute loss, then update weights
-            # loss_fn.update_kd_loss_params(iters=cur_iters + step, max_iters=max_iters)
-            if cfg['train_params']['dataset'] == "brain":
-                loss = loss_fn(f_results, o_results, y_seg, mask=True)
-            else:
-                loss = loss_fn(f_results, o_results, y_seg)
-
-            #             if cfg['train_params']['dataset'] == "brain":
-            #                 o_results[:, 0] = 0
-
-            o_results = [F.interpolate(o, size=(y_seg.size(-2), y_seg.size(-1)), mode='nearest') for o in o_results]
-
-            #             if cfg['train_params']['dataset'] == "brain":
-            #                 o_results[y_seg == 0] = 0
-
-            # 4. Evaluate test performance
-            performance = metric(o_results[-1], y_seg)
-
-            # 5. Store the loss and performance
-            running_loss = running_loss + loss.item()
-            running_performance = running_performance + performance.item()
-
-            cm = cm + compute_confusion_matrix(y_gt=y_seg.detach().cpu().numpy(),
-                                               y_pr=o_results[-1].detach().cpu().numpy(),
-                                               classes=classes)
-
-            # 6. Display losses
-            result = "{}: {:.4}".format('Val loss', loss)
-            pbar.set_postfix_str(result)
-
-        # Compute the average loss and performance
-        avg_loss = running_loss / len(val_loader)
-        # avg_performance = running_performance / len(val_loader)
-        pixel_acc, mean_acc, mean_IoU, IoU_array, dice, kappa = compute_eval_from_cm(cm)
-
-        # Return the loss and performance (average-over-epoch values) of the evaluation set
-        return avg_loss, mean_IoU, pixel_acc, mean_acc, IoU_array, dice, kappa, cm
-
-
-def training(train_cfg, optimizer, model, train_loader, val_loader, loss_fn,
-             metric, device, last_epoch, best_performance, comet=None):
-    """
-
-    :param train_cfg: training configuration dict
-    :param optimizer: optimizer for training
-    :param model: network model
-    :param train_loader: training dataloader
-    :param val_loader: validation dataloader
-    :param loss_fn: loss function
-    :param metric: metric for computing the performance
-    :param device: device used for training (cpu or gpu)
-    :param comet: comet-ml logger
-    :return:
-    """
-    # Number of iterations
-    epoch_iters = int(train_loader.dataset.__len__() /
-                      cfg['train_params']['batch_size'] / len(cfg['gpu_id']))
-    max_iters = epoch_iters * cfg['train_params']['n_epochs']
-
+def training_with_dynamic_classes(train_cfg, trainer, train_loader, val_loader, loss_fn,
+                                 metric, device, last_epoch, best_performance, 
+                                 class_tracker, comet=None):
+    """Enhanced training with dynamic class support"""
     n_epochs = train_cfg['n_epochs']
-    # best_model_indicator = 10000000
     not_improved_epochs = 0
-    # scheduler = StepLR(optimizer, step_size=25, gamma=0.8)
+    
+    # Calculate iterations for KD loss scheduling
+    epoch_iters = len(train_loader)
+    max_iters = epoch_iters * n_epochs
+    
     for epoch in range(last_epoch, n_epochs):
         print(f"\nTraining epoch {epoch + 1}/{n_epochs}")
         print("-----------------------------------")
-        # Train a epoch
+        
+        # Train epoch with dynamic classes
         with comet.train():
-            train_loss, train_performance = train_epoch(optimizer, model,
-                                                        train_loader, loss_fn,
-                                                        metric, device, epoch=epoch, epoch_iters=epoch_iters,
-                                                        max_iters=max_iters)
-            comet.log_metric('loss', train_loss, epoch=epoch + 1)
-            comet.log_metric('performance', train_performance, epoch=epoch + 1)
-
-        # Validate a epoch
+            train_metrics = trainer.train_epoch(train_loader, epoch)
+            
+            # Log training metrics
+            for key, value in train_metrics.items():
+                comet.log_metric(key, value, epoch=epoch + 1)
+        
+        # Validation epoch with dynamic classes
         with comet.validate():
-            val_loss, val_performance, pixel_acc, mean_acc, _, dice, kappa, cm = val_epoch(model, val_loader, loss_fn,
-                                                                                           metric, device,
-                                                                                           cfg['model_params'][
-                                                                                               'classes'])
-            comet.log_metric('loss', val_loss, epoch=epoch + 1)
-            comet.log_metric('performance', val_performance, epoch=epoch + 1)
-        # scheduler.step(epoch)
+            val_metrics = trainer.validate(val_loader)
+            
+            # Log validation metrics
+            for key, value in val_metrics.items():
+                comet.log_metric(key, value, epoch=epoch + 1)
+        
+        # Get class distribution summary
+        class_summary = trainer.get_class_distribution_summary()
+        print(f"Classes found so far: {class_summary['all_classes']}")
+        print(f"Samples per class: {class_summary['samples_per_class']}")
+        
+        # Print summary
         print(f"\nSummary of epoch {epoch + 1}:")
-        print(f"Train loss: {train_loss:.4f}, "
-              f"Train performance: {train_performance:.4f}")
-
-        print(f"Val loss: {val_loss:.4f}, "
-              f"Val performance: {val_performance:.4f} - Best: {best_performance:.4f}")
-        # print the rest of the metrics in one line
-        print(f"Pixel Acc: {pixel_acc:.4f}, Mean Acc: {mean_acc:.4f}, Mean IoU: {val_performance:.4f}")
-        print(f"Dice: {dice:.4f}, Kappa: {kappa:.4f}")
-        print('=> saving checkpoint to {}'.format(
-            train_cfg['save_dir'] + 'checkpoint.pth.tar'))
+        print(f"Train - Loss: {train_metrics['loss']:.4f}, mIoU: {train_metrics['mean_iou']:.4f}")
+        print(f"Val - Loss: {val_metrics['loss']:.4f}, mIoU: {val_metrics['mean_iou']:.4f} - Best: {best_performance:.4f}")
+        print(f"Pixel Acc: {val_metrics['accuracy']:.4f}, Dice: {val_metrics['dice']:.4f}, Kappa: {val_metrics['kappa']:.4f}")
+        
+        # Save checkpoint
+        print('=> saving checkpoint to {}'.format(train_cfg['save_dir'] + 'checkpoint.pth.tar'))
         os.makedirs(train_cfg['save_dir'], exist_ok=True)
         torch.save({
             'epoch': epoch + 1,
             'best_mIoU': best_performance,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
+            'state_dict': trainer.model.state_dict(),
+            'optimizer': trainer.optimizer.state_dict(),
         }, os.path.join(train_cfg['save_dir'], 'checkpoint.pth.tar'))
-
-        cm = pd.DataFrame(cm, index=cfg['model_params']['classes'], columns=cfg['model_params']['classes'])
-        cm.to_csv(f'{train_cfg["save_dir"]}/cm.csv')
-
-        # Save best model only
-        # if val_loss < best_model_indicator:
-        if val_performance >= best_performance:
-            print(f'Model exceeds prev best score'
-                  f'({val_performance:.4f} > {best_performance:.4f}). Saving it now.')
-            # best_model_indicator = val_loss
-            best_performance = val_performance
-
-            # Write the model
-            torch.save(model.state_dict(), train_cfg['save_dir'] + '/best_model.pth')
-
-            cm.to_csv(f'{train_cfg["save_dir"]}/best_cm.csv')
-            best_cm = cm
-
-            not_improved_epochs = 0  # reset counter
+        
+        # Save best model
+        current_performance = val_metrics['mean_iou']
+        if current_performance >= best_performance:
+            print(f'Model exceeds prev best score ({current_performance:.4f} > {best_performance:.4f}). Saving it now.')
+            best_performance = current_performance
+            torch.save(trainer.model.state_dict(), train_cfg['save_dir'] + '/best_model.pth')
+            not_improved_epochs = 0
         else:
-            if not_improved_epochs > train_cfg['early_stop']:  # early stopping
-                print(f"Stopping training early because it has not improved for "
-                      f"{train_cfg['early_stop']} epochs.")
+            not_improved_epochs += 1
+            if not_improved_epochs > train_cfg['early_stop']:
+                print(f"Stopping training early because it has not improved for {train_cfg['early_stop']} epochs.")
                 break
-            else:
-                not_improved_epochs = not_improved_epochs + 1
-    # Display the best confusion matrix
-    # Create a heatmap and display numerical values inside the cells
-    plt.imshow(best_cm, cmap='viridis', interpolation='nearest')
-
-    if cfg['train_params']['add_cm_labels'] != 0:
-        for i in range(best_cm.shape[0]):
-            for j in range(best_cm.shape[1]):
-                plt.text(j, i, str(best_cm[i, j]), ha='center', va='center', color='black')
-
-    # Display the colormap legend
-    plt.colorbar()
-
-    # Add labels and title
-    plt.xlabel('Predicted')
-    plt.ylabel('Actual')
-    plt.title('Confusion Matrix')
-
-    plt.show()
+        
+        # Update KD loss parameters if applicable
+        if hasattr(loss_fn, 'update_kd_loss_params'):
+            loss_fn.update_kd_loss_params(iters=epoch * epoch_iters, max_iters=max_iters)
 
 
-def testing(model, classes, test_loader, metric, device, n_heads, comet, save_dir):
-    """
-    Test the model with the test dataset
-    :param model: network model
-    :param test_loader: testing dataloader
-    :param metric: metric for computing the performance
-    :param device: device used for testing (cpu or gpu)
-    :param comet: comet logger object
-    :return:
-    """
+def testing_with_dynamic_classes(model, test_loader, metric, device, n_heads, 
+                                comet, save_dir, class_tracker):
+    """Enhanced testing with dynamic class support"""
     vis_path = f'{save_dir}/visual'
     os.makedirs(vis_path, exist_ok=True)
-    model.eval()  # set model to eval mode
+    
+    # Initialize dynamic metrics for testing
+    test_metrics = DynamicClassMetrics(ignore_index=0)
+    
+    model.eval()
     pbar = tqdm(test_loader, ncols=80, desc='Testing')
-    running_performance = [0] * n_heads
-    cm = [0] * n_heads
-    dices = [0] * n_heads
-    acc = [0] * n_heads
-    kappas = [0] * n_heads
-    aa = [0] * n_heads
-    count_kappa = [0] * n_heads
-    # dice_coeff = utils.metrics.Dice()
-    with torch.no_grad():  # declare no gradient operations, and namespacing in comet
+    
+    # Storage for multi-head outputs
+    all_predictions = [[] for _ in range(n_heads)]
+    all_targets = []
+    all_sample_ids = []
+    
+    with torch.no_grad():
         for step, minibatch in enumerate(pbar):
-            # 1. Get a minibatch data for testing
-            x, y_oht, y_seg, name = minibatch['input'], minibatch['ground_truth_onehot'], \
-                minibatch['ground_truth_seg'], minibatch['name'][0]
-            x = x.to(device)  # of size (batchsize, n_bands, H, W)
-            y_seg = y_seg.to(device)  # of size (batchsize, 1, H, W)
-            y_oht = y_oht.to(device)  # of size (batchsize, n_classes, H, W)
-
-            # 2. Compute the forward pass
-            f_results, o_results = model(x)  # of size (batchsize, n_classes, H, W)
-            o_results = [F.interpolate(o, size=(y_seg.size(-2), y_seg.size(-1)), mode='nearest') for o in o_results]
+            # Get batch data
+            x = minibatch['input'].to(device)
+            y_seg = minibatch['ground_truth_seg'].to(device)
+            sample_id = minibatch.get('name', [f'test_{step}'])[0]
+            
+            # Forward pass
+            f_results, o_results = model(x)
+            
+            # Interpolate outputs to match ground truth size
+            o_results = [F.interpolate(o, size=(y_seg.size(-2), y_seg.size(-1)), 
+                                     mode='nearest') for o in o_results]
+            
+            # Update class tracker
+            class_tracker.update(sample_id, y_seg[0].cpu().numpy())
+            
+            # Store predictions and targets
             for i in range(n_heads):
-                # 3. Compute the performance of the testing minibatch
-                performance = metric(o_results[i], y_seg)
-
-                # 4. Store the performance
-                running_performance[i] = running_performance[i] + performance.item()
-
-                # # 5. Show visual results
-                test_loader.dataset.save_pred(y_oht, sv_path=f'{vis_path}', name=f'{name}_gt.png')
-                test_loader.dataset.save_pred(o_results[i], sv_path=f'{vis_path}', name=f'{name}_clf{i}.png')
-
-                # 6. Compute the confusion matrix
-                cm[i] = cm[i] + compute_confusion_matrix(y_seg.detach().cpu().numpy(),
-                                                         o_results[i].detach().cpu().numpy(),
-                                                         classes=classes)
-
-                # 7. Test dice
-                dices[i] += utils.metrics.dice_coeff(o_results[i], y_seg, cfg['train_params']['dataset']=="brain")
-
-                # 8. Compute Accuracy
-                acc[i] += utils.metrics.accuracy(o_results[i], y_seg, cfg['train_params']['dataset']=="brain")
-
-                # 9. Compute Avg Accuracy
-                aa[i] += utils.metrics.average_accuracy(o_results[i], y_seg, cfg['train_params']['dataset']=="brain")
-
-                # 10. Compute Kappa
-                # k = utils.metrics.kappa(y_pr, y_seg)
-                k = utils.metrics.kappa(o_results[i], y_seg, cfg['train_params']['dataset']=="brain")
-                if not np.isnan(k):
-                    kappas[i] += k
-                    count_kappa[i] += 1
-            # kappa += utils.metrics.kappa(y_pr, y_seg)
-
+                all_predictions[i].append(o_results[i].cpu())
+            all_targets.append(y_seg.cpu())
+            all_sample_ids.append(sample_id)
+            
+            # Save visualizations
+            if step < 10:  # Save first 10 samples
+                test_loader.dataset.save_pred(y_seg, sv_path=vis_path, name=f'{sample_id}_gt.png')
+                for i in range(n_heads):
+                    test_loader.dataset.save_pred(o_results[i], sv_path=vis_path, 
+                                                name=f'{sample_id}_head_{i}.png')
+    
+    # Get all classes found during testing
+    all_classes = class_tracker.get_all_classes()
+    print(f"\nClasses found during testing: {all_classes}")
+    
+    # Evaluate each head
+    results = {}
     for i in range(n_heads):
-        pixel_acc, mean_acc, mean_IoU, IoU_array, dice, kappa = compute_eval_from_cm(cm[i])
-        # Compute the average performance of the test set
-        avg_performance = running_performance[i] / len(test_loader)
-        avg_dice = dices[i] / len(test_loader)
-
-        # Add the average performance value into the log_metric of comet object
-        print(f"Testing performance clf {i}: {avg_performance:.4f}")
-        comet.log_metric(f'test_performance_{i}', mean_IoU)
-
-        print(f"Testing dice clf {i}: {avg_dice:.4f}")
-        comet.log_metric(f'test_dice_{i}', dice)
-
-        # pos = cm[0].sum(1)
-        # res = cm[0].sum(0)
-        # tp = np.diag(cm[0])
-        # pixel_acc = tp.sum() / pos.sum()
-        # mean_acc = (tp / np.maximum(1.0, pos)).mean()
-        # IoU_array = (tp / np.maximum(1.0, pos + res - tp))
-        # mean_IoU = IoU_array.mean()
-        print(f"Testing all-mIoU clf {i}: {mean_IoU}")
-        print(f"Testing all-acc clf{i}: {pixel_acc}")
-        print(f"Testing all-OA clf {i}: {mean_acc}")
-        print(f"IoU Array {i}", IoU_array)
-        comet.log_metric(f"test_iou_array_{i}", IoU_array)
-
-        # Log the confusion matrix
-        comet.log_confusion_matrix(matrix=cm[i], labels=classes)
-
-        cm_pd = pd.DataFrame(cm[i], columns=classes, index=classes)
-        cm_pd.to_csv(f'{save_dir}/cm_{i}.csv')
-
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm)
-        disp.plot()
-        plt.show()
-
-        avg_acc = acc[i] / len(test_loader)
-        print(f"Overall Accuracy clf {i}: {avg_acc:.4f}")
-        comet.log_metric(f"test_oa_{i}", pixel_acc)
-
-        avg_aa = aa[i] / len(test_loader)
-        print(f"Average Accuracy Clf {i}: {avg_aa:.4f}")
-        comet.log_metric(f"test_aa_{i}", mean_acc)
-
-        avg_kappa = kappas[i] / count_kappa[i]
-        print(f"Average Kappa Clf {i}: {avg_kappa:.4f}")
-        comet.log_metric(f"test_kappa_{i}", kappa)
+        print(f"\n=== Evaluating Head {i} ===")
+        
+        # Concatenate predictions for this head
+        head_predictions = torch.cat(all_predictions[i], dim=0)
+        head_targets = torch.cat(all_targets, dim=0)
+        
+        # Compute confusion matrix with dynamic classes
+        confusion_matrix, class_labels = compute_confusion_matrix_dynamic(
+            head_targets.numpy(), 
+            head_predictions.numpy(),
+            all_possible_classes=all_classes,
+            ignore_index=0
+        )
+        
+        # Compute comprehensive metrics
+        metrics = compute_eval_from_cm_robust(confusion_matrix, class_names=[f'class_{c}' for c in class_labels])
+        
+        # Log metrics
+        print(f"Head {i} - mIoU: {metrics['mean_IoU']:.4f}")
+        print(f"Head {i} - Pixel Acc: {metrics['pixel_accuracy']:.4f}")
+        print(f"Head {i} - Mean Acc: {metrics['mean_accuracy']:.4f}")
+        print(f"Head {i} - Dice: {metrics['mean_dice']:.4f}")
+        print(f"Head {i} - Kappa: {metrics['kappa']:.4f}")
+        
+        comet.log_metric(f'test_mIoU_head_{i}', metrics['mean_IoU'])
+        comet.log_metric(f'test_pixel_acc_head_{i}', metrics['pixel_accuracy'])
+        comet.log_metric(f'test_mean_acc_head_{i}', metrics['mean_accuracy'])
+        comet.log_metric(f'test_dice_head_{i}', metrics['mean_dice'])
+        comet.log_metric(f'test_kappa_head_{i}', metrics['kappa'])
+        
+        # Log per-class metrics
+        print(f"IoU per class: {metrics['IoU_per_class']}")
+        comet.log_metric(f'test_IoU_array_head_{i}', metrics['IoU_per_class'])
+        
+        # Log confusion matrix
+        comet.log_confusion_matrix(matrix=confusion_matrix, labels=[str(c) for c in class_labels])
+        
+        # Save confusion matrix
+        cm_df = pd.DataFrame(confusion_matrix, columns=class_labels, index=class_labels)
+        cm_df.to_csv(f'{save_dir}/confusion_matrix_head_{i}.csv')
+        
+        # Store results
+        results[f'head_{i}'] = metrics
+    
+    # Save class distribution summary
+    class_summary = class_tracker.get_samples_by_class()
+    print(f"\nFinal class distribution: {class_summary}")
+    
+    # Save summary to file
+    summary_data = {
+        'all_classes': all_classes,
+        'class_distribution': class_summary,
+        'test_results': results
+    }
+    
+    import json
+    with open(f'{save_dir}/test_summary.json', 'w') as f:
+        json.dump(summary_data, f, indent=2)
+    
+    return results
 
 
 def init_seeds(seed):
-    """
-
-    :param seed:
-    :return:
-    """
-    # Setting seeds
+    """Initialize random seeds for reproducibility"""
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
     np.random.seed(seed)
@@ -552,19 +343,12 @@ def init_seeds(seed):
         torch.cuda.manual_seed(seed)
 
 
-# def convert_prob2seg_tensor(y_prob, classes):
-#     y_class = np.argmax(y_prob, axis=0)
-#     y_seg = np.zeros((y_prob.shape[1], y_prob.shape[2]))
-
-# ------------------------------------------------------------------------------
-# Main function
-# ------------------------------------------------------------------------------
 if __name__ == '__main__':
-    args = argparse.ArgumentParser(description='Main file')
+    args = argparse.ArgumentParser(description='Train teacher model for spatial transcriptomics')
     args.add_argument('--config', default='configs/base.yml', type=str,
                       help='config file path (default: None)')
     args.add_argument('--debug', default=0, type=int,
-                      help='debug mode? (default: 0')
+                      help='debug mode? (default: 0)')
     cmd_args = args.parse_args()
 
     assert cmd_args.config is not None, "Please specify a config file"
@@ -572,46 +356,37 @@ if __name__ == '__main__':
     # Configuring comet-ml logger
     api_key_path = "./configs/comet-ml-key.txt"
     if os.path.isfile(api_key_path) and os.access(api_key_path, os.R_OK):
-        f = open(api_key_path, "r")
-        comet_key = f.read()
-        f.close()
+        with open(api_key_path, "r") as f:
+            comet_key = f.read().strip()
     else:
         raise FileNotFoundError(
             'You need to create a textfile containing only the comet-ml api key. '
             'The full path should be ./configs/comet-ml-key.txt')
 
     comet = Experiment(api_key=comet_key,
-                       project_name="uow-hsi-kdm",
-                       workspace="hieuphan",
-                       disabled=False,
-                       auto_metric_logging=False)
+                      project_name="spatial-transcriptomics-teacher",
+                      workspace="hieuphan",
+                      disabled=bool(cmd_args.debug),
+                      auto_metric_logging=False)
 
     # Read experiment configurations
-    nn_config_path = cmd_args.config
-    with open(nn_config_path) as file:
+    with open(cmd_args.config) as file:
         cfg = yaml.load(file, Loader=yaml.FullLoader)
 
+    # Handle debug mode
     if cmd_args.debug == 1:
-        cfg['train_params']['dataset_dir'] = '/home/hieu/research/data/UOW-HSI'
-        cfg['train_params']['num_workers'] = 0
-        cfg['batch_size'] = 1
-        cfg['warmup_epochs'] = 1
-        cfg['debug_mode'] = 1
         print('DEBUG mode')
         save_dir = 'experiments/test-folder'
         create_exp_dir(save_dir, visual_folder=True)
     elif cfg['train_params']['save_dir'] == '':
-        # If not debug, we create a folder to store the model weights and etc
-        save_dir = f'experiments/{cfg["name"]}-{time.strftime("%Y%m%d-%H%M%S")}'
+        save_dir = f'experiments/{cfg["name"]}-teacher-{time.strftime("%Y%m%d-%H%M%S")}'
         create_exp_dir(save_dir, visual_folder=True)
     else:
         save_dir = f"experiments/{cfg['train_params']['save_dir']}"
 
-    cfg['train_params']['dataset'] = cfg['dataset']
     cfg['train_params']['save_dir'] = save_dir
-    comet.set_name('%s-%depochs' % (cfg['name'], cfg['train_params']['n_epochs']))
-    comet.log_asset(nn_config_path)
-    comet.add_tags(cfg['tags'])
-    #
+    comet.set_name(f'{cfg["name"]}-teacher-{cfg["train_params"]["n_epochs"]}epochs')
+    comet.log_asset(cmd_args.config)
+    comet.add_tags(cfg.get('tags', []) + ['teacher', 'spatial_transcriptomics'])
+
     main(cfg, comet)
-    # debug(cfg)

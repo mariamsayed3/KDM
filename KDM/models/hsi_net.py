@@ -14,6 +14,7 @@ import pprint
 import torch.nn.functional as F
 from segmentation_models_pytorch.encoders import get_encoder
 from segmentation_models_pytorch.base.heads import SegmentationHead
+import numpy as np
 
 DEBUG = False
 
@@ -74,6 +75,8 @@ class NormLayer(nn.Module):
 # ------------------------------------------------------------------------------
 # Auxiliary functions
 # ------------------------------------------------------------------------------
+
+# 2. FIX THE norm_intensity FUNCTION:
 def norm_intensity(x, max_val=1):
     """
     This function normalizes the intensity of the input tensor x into [0, max_val]
@@ -84,7 +87,8 @@ def norm_intensity(x, max_val=1):
     if max_val is None:
         max_val = 1
 
-    if len(list(torch.unique(input).size())) != 1:  # avoid the case that the tensor contains only one value
+    # FIXED: Changed 'input' to 'x'
+    if len(list(torch.unique(x).size())) != 1:  # avoid the case that the tensor contains only one value
         x = x - torch.min(x)
 
     x = x / torch.max(x) * max_val
@@ -104,9 +108,9 @@ def compute_padding(x, divisible_number=16):
     # Reversed because pytorch's pad() receive in a reversed order
     for org_size in reversed(input_shape_list[2:]):
         # compute the padding amount in two sides
-        p = np.int32((np.int32((org_size - 1) / divisible_number) + 1) * divisible_number - org_size)
+        p = int((int((org_size - 1) / divisible_number) + 1) * divisible_number - org_size)
         # padding amount in one size
-        p1 = np.int32(p / 2)
+        p1 = int(p / 2)
         padding.append(p1)
         padding.append(p - p1)
 
@@ -146,8 +150,8 @@ def conv_block(c_in, c_out, stride=1, kernel_size=3, negative_slope=0.2,
     return nn.Sequential(*block)
 
 class HSINet(nn.Module):
-    def __init__(self, classes=[0, 1, 2, 3, 4], n_bands=25, nf_enc=[16, 32, 32, 32], nf_dec=[32, 32, 32, 32, 8, 8],
-                 do_batchnorm=False, max_norm_val=None):
+    def __init__(self, classes=[0, 1, 2, 3, 4,5], n_bands=136, nf_enc=[32, 64, 64, 64], nf_dec=[64, 64, 32, 32, 16, 8],
+                 do_batchnorm=True, max_norm_val=None):
         """
         Initialize a hsi_net instance
         :param classes: list of classes in the segmentation problem
@@ -246,8 +250,8 @@ class HSINet(nn.Module):
 
 
 class Res_SGR_Net(nn.Module):
-    def __init__(self, classes=[0, 1, 2, 3, 4], n_bands=25, nf_enc=[16, 32, 32, 32], nf_dec=[32, 32, 32, 32, 8, 8],
-                 do_batchnorm=False, max_norm_val=None, n_heads=3, encoder_name='resnet50'):
+    def __init__(self, classes=[0, 1, 2, 3, 4,5], n_bands=136, nf_enc=[32, 64, 64, 64], nf_dec=[64, 64, 32, 32, 16, 8],
+                 do_batchnorm=True, max_norm_val=None, n_heads=3, encoder_name='resnet50'):
         """
         Initialize a hsi_net instance
         :param classes: list of classes in the segmentation problem
@@ -424,8 +428,8 @@ class Res_SGR_Net(nn.Module):
 
 
 class Teacher_Res_SGR_Net(nn.Module):
-    def __init__(self, classes=[0, 1, 2, 3, 4], n_bands=25, nf_enc=[16, 32, 32, 32], nf_dec=[32, 32, 32, 32, 8, 8],
-                 do_batchnorm=False, max_norm_val=None, n_heads=3, encoder_name='resnet50'):
+    def __init__(self, classes=[0, 1, 2, 3, 4,5], n_bands=136, nf_enc=[32, 64, 64, 64], nf_dec=[64, 64, 32, 32, 16, 8],
+                 do_batchnorm=True, max_norm_val=None, n_heads=3, encoder_name='resnet50'):
         """
         Initialize a hsi_net instance
         :param classes: list of classes in the segmentation problem
@@ -608,9 +612,10 @@ if __name__ == "__main__":
     # iamcourtesy = Courtesy()
     x = torch.rand((1, 25, 217, 409))
     print(x.shape)
-    model = HSINet(n_bands=25, classes=[0, 1, 2, 3, 4],
+    model = HSINet(n_bands=25, classes=[0, 1, 2, 3, 4,5],
                    nf_enc=[16, 32, 32, 32], nf_dec=[32, 32, 32, 32, 8, 8],
                    do_batchnorm=False, max_norm_val=None)
+
 
     y = model(x)
 
@@ -656,3 +661,231 @@ if __name__ == "__main__":
         total_bits += bits
 
     print('Total bits of the model: %d' % total_bits)
+
+# Step 1: Modify the existing hsi_net.py file
+# Just add this class - no need to change anything else
+
+
+class IgnoreBackgroundLayer(nn.Module):
+    """
+    Layer to ignore class 0 (background) in predictions and targets
+    """
+    def __init__(self, ignore_index=0):
+        super(IgnoreBackgroundLayer, self).__init__()
+        self.ignore_index = ignore_index
+    
+    def forward(self, pred, target):
+        """
+        Args:
+            pred: predictions of shape (B, C, H, W)
+            target: targets of shape (B, 1, H, W) or (B, H, W)
+        Returns:
+            masked_pred, masked_target with ignore_index areas set to appropriate values
+        """
+        if target.dim() == 4:
+            target = target.squeeze(1)  # Remove channel dimension if present
+        
+        # Create mask for valid pixels (not ignore_index)
+        valid_mask = (target != self.ignore_index)
+        
+        # Clone predictions and targets
+        masked_pred = pred.clone()
+        masked_target = target.clone()
+        
+        # Set ignore areas in target to ignore_index for loss computation
+        masked_target[~valid_mask] = self.ignore_index
+        
+        return masked_pred, masked_target, valid_mask
+
+class SpatialTranscriptomicsNet(HSINet):
+    def __init__(self, cell_types=[1, 2, 3, 4, 5],  # Remove 0 from active classes
+                 n_genes=136, ignore_index=0, **kwargs):
+        # Add ignore_index to classes for model architecture (total 6 classes)
+        all_classes = [ignore_index] + cell_types
+        super().__init__(classes=all_classes, n_bands=n_genes, **kwargs)
+        
+        self.n_genes = n_genes
+        self.cell_types = cell_types
+        self.active_classes = cell_types  # Only classes we care about
+        self.ignore_index = ignore_index
+        
+        # Add ignore layer
+        self.ignore_layer = IgnoreBackgroundLayer(ignore_index=ignore_index)
+        
+        # Gene attention mechanism
+        reduction_factor = max(8, n_genes // 16)
+        hidden_genes = max(16, n_genes // reduction_factor)
+        
+        self.gene_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(n_genes, hidden_genes),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_genes, n_genes),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, x, target=None):
+        # Apply gene attention
+        b, c, h, w = x.shape
+        attention = self.gene_attention(x)
+        attention = attention.view(b, c, 1, 1)
+        x = x * attention
+        
+        # Get features and output from parent
+        features, output = super().forward(x)
+        
+        # Apply ignore mask if target is provided (during training)
+        if target is not None and self.training:
+            output, target, valid_mask = self.ignore_layer(output, target)
+            return features, output, target, valid_mask
+        
+        return features, output
+
+class SpatialTranscriptomics_SGR_Net(Res_SGR_Net):
+    """
+    Knowledge Distillation version for Spatial Transcriptomics with ignore index support
+    """
+    def __init__(self, cell_types=[1, 2, 3, 4, 5],  # Only active classes
+                 n_genes=136, encoder_name='resnet50', 
+                 ignore_index=0, **kwargs):
+        
+        # Include ignore_index for architecture (total 6 classes) but only train on active classes
+        all_classes = [ignore_index] + cell_types  # [0, 1, 2, 3, 4, 5]
+        
+        # Initialize with correct parameters
+        super().__init__(classes=all_classes, n_bands=n_genes, encoder_name=encoder_name, **kwargs)
+        
+        # Update parameters
+        self.n_genes = n_genes
+        self.cell_types = cell_types  # Active classes [1, 2, 3, 4, 5]
+        self.all_classes = all_classes  # All classes including ignore [0, 1, 2, 3, 4, 5]
+        self.ignore_index = ignore_index
+        
+        # Add ignore layer
+        self.ignore_layer = IgnoreBackgroundLayer(ignore_index=ignore_index)
+        
+        # Fix the encoder for gene expression input
+        self._fix_encoder_for_genes(n_genes, encoder_name)
+    
+    def forward(self, x, early_exit=None, target=None):
+        """
+        Forward pass with ignore index support
+        """
+        size = (x.size(2), x.size(3))
+        
+        # Normalize the input
+        x = self.norm_input(x)
+        input_org = x  # will be used by last post_layer via skip-connect
+        
+        # Add layers in the encoder
+        enc_outputs = self.encoder(x)
+        enc_outputs = enc_outputs[1:]
+        x = enc_outputs[-1]
+        f_results, o_results = [], []
+        
+        # Add layers in the decoder
+        n_encoder_layers = len(self.nf_enc)
+        cnt = 0
+        for (idx, layer) in enumerate(self.decoder):
+            # concatenate the output with the corresponding encoder layer if it is required
+            if idx != 0:  # concatenate on the channel dimension
+                enc_output = enc_outputs[n_encoder_layers - idx - 1]
+                x = torch.cat((x, enc_output), 1)
+            
+            # Add the decoder layer
+            x = layer(x)
+            
+            # Student sub-networks
+            if idx == self.start_aux:
+                o = self.heads[cnt](x)
+                if early_exit == cnt:
+                    return x, o
+                o_results.append(F.interpolate(o, size))
+            elif idx > self.start_aux:
+                feat_size = (x.size(2), x.size(3))
+                x, a = self.feature_learning[cnt](x, F.interpolate(o, feat_size))
+                cnt += 1
+                o = self.heads[cnt](x)
+                if early_exit == cnt:
+                    return x, o
+                o_results.append(F.interpolate(o, size))
+                f_results.append(x)
+        
+        # Add layers after the decoder
+        for (idx, layer) in enumerate(self.post_layers):
+            # Concatenate the input of second last layer with the original
+            if idx == (len(self.post_layers) - 2):
+                x = torch.cat((x, input_org), 1)
+            
+            # Add the layer
+            x = layer(x)
+            if idx + n_encoder_layers == self.start_aux:
+                o = self.heads[cnt](x)
+                if early_exit == cnt:
+                    return x, o
+                o_results.append(F.interpolate(o, size))
+            elif idx + n_encoder_layers > self.start_aux:
+                x, a = self.feature_learning[cnt](x, o)
+                cnt += 1
+                o = self.heads[cnt](x)
+                if early_exit == cnt:
+                    return x, o
+                o_results.append(o)
+                f_results.append(x)
+        
+        # Apply ignore mask if target is provided (during training)
+        if target is not None and self.training:
+            # Apply ignore mask to each head output
+            masked_o_results = []
+            for o in o_results:
+                _, masked_o, _ = self.ignore_layer(o, target)
+                masked_o_results.append(masked_o)
+            return f_results, masked_o_results
+        
+        return f_results, o_results
+    
+    def _fix_encoder_for_genes(self, n_genes, encoder_name):
+        """Fix ResNet encoder to accept gene expression channels"""
+        # Get the encoder's first layer
+        if hasattr(self.encoder, 'conv1'):
+            old_conv = self.encoder.conv1
+        else:
+            # For segmentation_models_pytorch encoders
+            for name, module in self.encoder.named_modules():
+                if isinstance(module, nn.Conv2d):
+                    old_conv = module
+                    break
+        
+        # Create new first layer
+        new_conv = nn.Conv2d(
+            n_genes, 
+            old_conv.out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            bias=old_conv.bias is not None
+        )
+        
+        # Initialize weights
+        with torch.no_grad():
+            if old_conv.weight.shape[1] == 3 and n_genes != 3:
+                # Adapt pretrained RGB weights to gene channels
+                weight_mean = old_conv.weight.mean(dim=1, keepdim=True)
+                new_conv.weight.data = weight_mean.repeat(1, n_genes, 1, 1) / n_genes
+            else:
+                nn.init.kaiming_normal_(new_conv.weight, mode='fan_out', nonlinearity='relu')
+            
+            if new_conv.bias is not None:
+                new_conv.bias.data = old_conv.bias.data.clone()
+        
+        # Replace the conv layer
+        if hasattr(self.encoder, 'conv1'):
+            self.encoder.conv1 = new_conv
+        else:
+            # For segmentation_models_pytorch, replace in the model
+            for name, module in self.encoder.named_children():
+                if isinstance(module, nn.Conv2d):
+                    setattr(self.encoder, name, new_conv)
+                    break

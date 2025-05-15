@@ -19,6 +19,7 @@ import os
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+import torchvision.transforms as transforms
 
 # Local application imports
 
@@ -77,14 +78,14 @@ class HSIDataset(Dataset):
         if not os.path.exists(raw_file) or not os.path.exists(bmp_file):
             raise FileNotFoundError(f"File not found: {raw_file} or {bmp_file}")
         # Read the hsi image
-        #x = np.load(raw_file)[:32, :32]
+        x = np.load(raw_file)
         #x = spectral.Image(x)
         if len(x.shape) != 3:
             raise ValueError(f"HSI image does not have 3 dimensions, got {x.shape}")
         x = np.moveaxis(x, [0, 1, 2], [1, 2, 0])    # of size (n_bands, H, W)
         x = np.float32(x)                           # convert the input data into float32 datatype
         # Read the ground-truth image
-        #y_seg = np.load(bmp_file)[:32,:32]
+        y_seg = np.load(bmp_file)
         y_oht = convert_seg2onehot(y_seg, self.classes)                     # of size (n_classes, H, W)
         # Convert the images into Pytorch tensors
         x = torch.Tensor(x)                                 # of size (n_bands, H, W)
@@ -133,99 +134,205 @@ class HSIDataset(Dataset):
             n = os.path.splitext(name)[0]
             save_img.save(os.path.join(sv_path, '{}.png'.format(n)))
 
-def convert_seg2onehot(y_seg, classes):
+import os
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+import json
+
+class SpatialTranscriptomicsDataset(Dataset):
+    def __init__(self, img_paths, seg_paths=None, 
+                 cutting=None, transform=None,
+                 channels=None, outtype='3d', envi_type='img',
+                 multi_class=1, classes=[1, 2, 3, 4, 5], ignore_index=0):  # Note: removed 0 from classes
+        """
+        Initialize Spatial Transcriptomics Dataset
+        Args:
+            classes: Active classes (without background/ignore class)
+            ignore_index: Index to ignore in loss computation (default: 0)
+        """
+        self.img_paths = img_paths
+        self.seg_paths = seg_paths
+        self.classes = classes  # Only active classes [1, 2, 3, 4, 5]
+        self.ignore_index = ignore_index
+        self.transform = transform
+        self.cutting = cutting
+        self.channels = channels
+        self.outtype = outtype
+        self.envi_type = envi_type
+        self.multi_class = multi_class
+        
+        # Include ignore index for one-hot encoding but not for active training
+        self.all_classes = [ignore_index] + classes  # [0, 1, 2, 3, 4, 5]
+        
+    def __getitem__(self, index):
+        img_path = self.img_paths[index]
+        mask_path = self.seg_paths[index]
+        
+        # Load data
+        mask = np.load(mask_path)[:32, :32]
+        img = np.load(img_path)[:32, :32, :]  # Shape: [32, 32, 136]
+        
+        # Clean mask - keep only valid classes, set rest to ignore_index
+        mask[mask == 190] = self.ignore_index  # Remove old ignore-mask
+        valid = np.isin(mask, self.classes)
+        mask[~valid] = self.ignore_index  # Set all non-valid to ignore_index
+        mask = mask.astype(np.int64)
+        
+        # Process image: [32, 32, 136] -> [136, 32, 32]
+        img = np.transpose(img, (2, 0, 1))  # Now: [136, 32, 32]
+        img = img.astype(np.float32)
+        
+        # Create one-hot encoding for ALL classes (including ignore_index for compatibility)
+        mask_onehot = np.zeros((len(self.all_classes), mask.shape[0], mask.shape[1]))
+        for i, class_label in enumerate(self.all_classes):
+            mask_onehot[i, mask == class_label] = 1
+        
+        # Convert to torch tensors
+        img_tensor = torch.from_numpy(img)
+        mask_tensor = torch.from_numpy(mask).long()
+        mask_onehot_tensor = torch.from_numpy(mask_onehot).float()
+        
+        # Get sample name
+        sample_name = os.path.basename(img_path).replace('.npy', '')
+        
+        return {
+            'input': img_tensor,                    # Shape: (136, 32, 32)
+            'ground_truth_seg': mask_tensor.unsqueeze(0),  # Shape: (1, 32, 32)
+            'ground_truth_onehot': mask_onehot_tensor,     # Shape: (6, 32, 32)
+            'name': sample_name
+        }
+    
+    def __len__(self):
+        return len(self.img_paths)
+
+    def save_pred(self, pred_tensor, sv_path, name):
+        """Save prediction - same as HSI dataset"""
+        # Convert tensor to numpy if needed
+        if torch.is_tensor(pred_tensor):
+            pred_np = pred_tensor.detach().cpu().numpy()
+        else:
+            pred_np = pred_tensor
+            
+        # Handle different input shapes
+        if len(pred_np.shape) == 4:  # Batch dimension
+            pred_np = pred_np[0]
+            
+        if len(pred_np.shape) == 3:  # Multi-class predictions
+            pred_np = np.argmax(pred_np, axis=0)
+            
+        # Create color-coded visualization like HSI
+        colors = ['black', 'green', 'blue', 'red', 'yellow', 'cyan']
+        color_map_by_label = {
+            0: [119, 158, 203],  # Background
+            1: [124, 252, 0],    # Class 1
+            2: [155, 118, 83],   # Class 2
+            3: [255, 0, 0],      # Class 3
+            4: [213, 213, 215],  # Class 4
+            5: [0, 255, 255]     # Class 5
+        }
+        
+        # Save as image
+        os.makedirs(sv_path, exist_ok=True)
+        save_img = Image.fromarray(pred_np.astype(np.uint8))
+        
+        # Apply color palette
+        palette = []
+        for i in range(256):
+            if i in color_map_by_label:
+                palette.extend(color_map_by_label[i])
+            else:
+                palette.extend([0, 0, 0])
+        save_img.putpalette(palette)
+        
+        save_path = os.path.join(sv_path, f'{name}.png')
+        save_img.save(save_path)
+
+
+def get_spatial_transcriptomics_dataloaders(data_dir, batch_size=32, num_workers=4):
     """
-    Convert the segmentation image y into the one-hot code image
-    :param y_seg: 2D array, a segmentation image with a size of H x W
-    :param classes: list of classes in image y
-    :return: one-hot code image of y with a size of n_classes x H x W
+    Create dataloaders for spatial transcriptomics data using the existing file structure
+    Args:
+        data_dir: Base directory containing the dataset divide JSON and data files
+        batch_size: Batch size for training
+        num_workers: Number of workers for data loading
+    Returns:
+        train_loader, val_loader, test_loader
     """
-    y_onehot = np.zeros((len(classes), y_seg.shape[0], y_seg.shape[1]))
+    # Load dataset split
+    dataset_divide = os.path.join(data_dir, 'dataset_divide.json')
+    with open(dataset_divide, 'r') as f:
+        dataset_dict = json.load(f)
+    
+    # Get file lists for each split
+    if 'train' in dataset_dict and 'val' in dataset_dict and 'test' in dataset_dict:
+        train_files = dataset_dict['train']
+        val_files = dataset_dict['val'] 
+        test_files = dataset_dict['test']
+    else:
+        # Fallback: use folds
+        train_files = dataset_dict.get('fold1', []) + dataset_dict.get('fold2', []) + dataset_dict.get('fold3', [])
+        val_files = dataset_dict.get('fold4', [])
+        test_files = dataset_dict.get('fold5', val_files)  # Use val as test if no separate test
+    
+    # Create file paths
+    train_img_paths = [os.path.join(data_dir, f"gene_expre_matrix_{i}.npy") for i in train_files]
+    train_mask_paths = [os.path.join(data_dir, f"label_matrix_{i}.npy") for i in train_files]
+    
+    val_img_paths = [os.path.join(data_dir, f"gene_expre_matrix_{i}.npy") for i in val_files]
+    val_mask_paths = [os.path.join(data_dir, f"label_matrix_{i}.npy") for i in val_files]
+    
+    test_img_paths = [os.path.join(data_dir, f"gene_expre_matrix_{i}.npy") for i in test_files]
+    test_mask_paths = [os.path.join(data_dir, f"label_matrix_{i}.npy") for i in test_files]
+    
+    # Create datasets
+    train_dataset = SpatialTranscriptomicsDataset(
+        train_img_paths, 
+        train_mask_paths,
+        outtype='3d'
+    )
+    
+    val_dataset = SpatialTranscriptomicsDataset(
+        val_img_paths,
+        val_mask_paths, 
+        outtype='3d'
+    )
+    
+    test_dataset = SpatialTranscriptomicsDataset(
+        test_img_paths,
+        test_mask_paths,
+        outtype='3d'
+    )
+    
+    # Create dataloaders
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True
+    )
+    
+    print(f"Training samples: {len(train_files)}")
+    print(f"Validation samples: {len(val_files)}")
+    print(f"Test samples: {len(test_files)}")
+    
+    return train_loader, val_loader, test_loader
 
-    for k, class_label in enumerate(classes):
-        y_onehot[k, :, :][y_seg == class_label] = 1
-
-    return y_onehot
-
-
-def convert_prob2seg(y_prob, classes):
-    """
-    Convert the class-probability image into the segmentation image
-    :param y_prob: class-probability image with a size of n_classes x H x W
-    :param classes: list of classes in image y
-    :return: 2D array, a segmentation image with a size of H x W
-    """
-    y_class = np.argmax(y_prob, axis=0)
-    y_seg = np.zeros((y_prob.shape[1], y_prob.shape[2]))
-
-    for k, class_label in enumerate(classes):
-        # Find indices in y_class whose pixels are k
-        indx = np.where(y_class == k)
-        if len(indx[0] > 0):
-            y_seg[indx] = class_label
-
-    return y_seg
-
-
-if __name__ == "__main__":
-    pc_dir = '/mnt/Windows/cv_projects/archive/'
-    # pc_dir = 'U:/02-Data/UOW-HSI/'
-    training_files = ['../data-3125/P2.txt']
-    t = {}
-    for im_file in training_files:
-        img_files = list(loadtxt(im_file, dtype=str))
-        for f in img_files:
-            bmp_file = pc_dir + f
-            bmp = Image.open(bmp_file)
-            # y = np.array(bmp.getdata())
-            y = np.array(bmp.getdata()).reshape(bmp.size[1], bmp.size[0])
-            y_unique = np.unique(y)
-            #print(f)
-            if 0 in y_unique:
-                print(im_file, '-',f)
-
-
-    classes = [0, 1, 2, 3, 4]
-    # Convert the segmentation image y into the one-hot code image
-    y_gt = convert_seg2onehot(y, classes)
-
-    # Convert the one-hot code image y into the segmentation image
-    y_seg = convert_prob2seg(y_gt, classes)
-
-    colors = ['black', 'green', 'blue', 'red', 'yellow']
-    cmap = mpl.colors.ListedColormap(colors[np.min(bmp):])
-
-    # Plot images
-    fig = plt.figure(figsize=(9, 6))
-    fig.subplots_adjust(bottom=0.5)
-    ax = plt.subplot(321)
-    im = ax.imshow(y, cmap=cmap)
-    plt.title('Ground-truth image')
-    fig.colorbar(im, ax=ax)
-
-    ax = plt.subplot(322)
-    im = ax.imshow(y_seg, cmap=cmap)
-    plt.title('Ground-truth image')
-    fig.colorbar(im, ax=ax)
-
-    ax = plt.subplot(323)
-    im = ax.imshow(y_gt[0, :, :])
-    plt.title('Ground-truth 1st channel')
-    fig.colorbar(im, ax=ax)
-
-    ax = plt.subplot(324)
-    im = ax.imshow(y_gt[1, :, :])
-    plt.title('Ground-truth 2nd channel')
-    fig.colorbar(im, ax=ax)
-
-    ax = plt.subplot(325)
-    im = ax.imshow(y_gt[2, :, :])
-    plt.title('Ground-truth 3rd channel')
-    fig.colorbar(im, ax=ax)
-
-    ax = plt.subplot(326)
-    im = ax.imshow(y_gt[3, :, :])
-    plt.title('Ground-truth 4th channel')
-    fig.colorbar(im, ax=ax)
-    plt.show()
 

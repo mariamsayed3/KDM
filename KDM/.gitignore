@@ -21,3 +21,6 @@ plot_loss/*
 *__pycache__*
 test_palette.py 
 result.csv
+KDM/bioDataset2
+KDM/bioDataset3
+KDM/bioDataset

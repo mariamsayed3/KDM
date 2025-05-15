@@ -15,11 +15,10 @@ import cv2
 import torch
 from PIL import Image
 from torch.autograd import Variable
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import confusion_matrix as sklearn_confusion_matrix
 import torch.nn.functional as F
 
 # Local application imports
-from utils.datasets import HSIDataset
 from tqdm import tqdm
 
 
@@ -225,65 +224,65 @@ def visualize_att(dataloader, model, num_results = 3, sv_dir = '',
             if index > max_count:
                 return
 
-def show_visual_results(x, y_gt, y_pr, classes=[0, 1, 2, 3, 4],
-                        show_visual=0, comet=None, fig_name=""):
-    """
-    Show the pseudo-color, ground-truth, and output images
-    :param x: array of size (batchsize, n_bands, H, W)
-    :param y_gt: array of size (batchsize, 1, H, W)
-    :param y_pr: array of size (batchsize, n_classes, H, W)
-    :param classes: list of class labels
-    :param show_visual: boolean to display the figure or not
-    :param comet: comet logger object
-    :param fig_name: string as the figure name for the comet logger
-    :return:
-    """
-    # Select the first image in the batch to display
-    y_gt = y_gt[0, ...]                      # of size (H, W)
-    y_pr = y_pr[0, ...]                         # of size (n_classes, H, W)
-    x = x[0, ...]                               # of size (n_bands, H, W)
-    x = np.moveaxis(x, [0, 1, 2], [2, 0, 1])    # of size (H, W, n_bands)
+# def show_visual_results(x, y_gt, y_pr, classes=[0, 1, 2, 3, 4],
+#                         show_visual=0, comet=None, fig_name=""):
+#     """
+#     Show the pseudo-color, ground-truth, and output images
+#     :param x: array of size (batchsize, n_bands, H, W)
+#     :param y_gt: array of size (batchsize, 1, H, W)
+#     :param y_pr: array of size (batchsize, n_classes, H, W)
+#     :param classes: list of class labels
+#     :param show_visual: boolean to display the figure or not
+#     :param comet: comet logger object
+#     :param fig_name: string as the figure name for the comet logger
+#     :return:
+#     """
+#     # Select the first image in the batch to display
+#     y_gt = y_gt[0, ...]                      # of size (H, W)
+#     y_pr = y_pr[0, ...]                         # of size (n_classes, H, W)
+#     x = x[0, ...]                               # of size (n_bands, H, W)
+#     x = np.moveaxis(x, [0, 1, 2], [2, 0, 1])    # of size (H, W, n_bands)
 
-    # Convert the probability into the segmentation result image
-    y_pr = convert_prob2seg(y_pr, classes)
+#     # Convert the probability into the segmentation result image
+#     y_pr = convert_prob2seg(y_pr, classes)
 
-    # Set figure to display
-    h = 2
-    if plt.fignum_exists(h):  # close if the figure existed
-        plt.close()
-    fig = plt.figure(figsize=(9, 2))
-    fig.subplots_adjust(bottom=0.5)
+#     # Set figure to display
+#     h = 2
+#     if plt.fignum_exists(h):  # close if the figure existed
+#         plt.close()
+#     fig = plt.figure(figsize=(9, 2))
+#     fig.subplots_adjust(bottom=0.5)
 
-    # Set colormap
-    colors = ['black', 'green', 'blue', 'red', 'yellow']
-    cmap_ygt = mpl.colors.ListedColormap(colors[np.int(np.min(y_gt)):np.int(np.max(y_gt)) + 1])
-    cmap_ypr = mpl.colors.ListedColormap(colors[np.int(np.min(y_pr)):np.int(np.max(y_pr)) + 1])
-    # print('Input classes = ', np.unique(y_gt))
-    # print('Output classes = ', np.unique(y_pr))
+#     # Set colormap
+#     colors = ['black', 'green', 'blue', 'red', 'yellow']
+#     cmap_ygt = mpl.colors.ListedColormap(colors[np.int(np.min(y_gt)):np.int(np.max(y_gt)) + 1])
+#     cmap_ypr = mpl.colors.ListedColormap(colors[np.int(np.min(y_pr)):np.int(np.max(y_pr)) + 1])
+#     # print('Input classes = ', np.unique(y_gt))
+#     # print('Output classes = ', np.unique(y_pr))
 
-    # Plot the pseudo-color image
-    plt.subplot(131)
-    plt.imshow(hsi_img2rgb(x))
-    plt.title('Pseudo-color image')
+#     # Plot the pseudo-color image
+#     plt.subplot(131)
+#     plt.imshow(hsi_img2rgb(x))
+#     plt.title('Pseudo-color image')
 
-    # Plot the ground-truth image
-    ax = plt.subplot(132)
-    im = ax.imshow(y_gt, cmap=cmap_ygt)
-    plt.title('Ground-truth image')
-    fig.colorbar(im, ax=ax)
+#     # Plot the ground-truth image
+#     ax = plt.subplot(132)
+#     im = ax.imshow(y_gt, cmap=cmap_ygt)
+#     plt.title('Ground-truth image')
+#     fig.colorbar(im, ax=ax)
 
-    # Plot the predicted segmentation image
-    ax = plt.subplot(133)
-    im = ax.imshow(y_pr, cmap=cmap_ypr)
-    plt.title('Predicted segmentation image')
-    fig.colorbar(im, ax=ax)
-    plt.savefig(fig_name)
+#     # Plot the predicted segmentation image
+#     ax = plt.subplot(133)
+#     im = ax.imshow(y_pr, cmap=cmap_ypr)
+#     plt.title('Predicted segmentation image')
+#     fig.colorbar(im, ax=ax)
+#     plt.savefig(fig_name)
 
-    # if show_visual:
-    #     plt.show()
+#     # if show_visual:
+#     #     plt.show()
 
-    if comet is not None:
-        comet.log_figure(figure_name=fig_name, figure=fig)
+#     if comet is not None:
+#         comet.log_figure(figure_name=fig_name, figure=fig)
 
 
 def create_exp_dir(path, visual_folder=False):
@@ -318,54 +317,23 @@ def prepare_device(n_gpu_use=1):
 
 def get_experiment_dataloaders(cfg):
     """
-    Get and return the train, validation, and test dataloaders for the experiment.
-    :param classes: list of classes (denoted by a number started from 0) of the segmentation problem,
-                    e.g. [0, 1, 2, 3, 4, 5]
+    Get and return the train, validation, and test dataloaders for spatial transcriptomics.
     :param cfg: dict that contains the required settings for the dataloaders
-                (dataset_dir and train_txtfiles)
     :return: train, validation, and test dataloaders
     """
-    # Create an instance of the HSIDataset
-
-    print('dataset_dir ',cfg['dataset_dir'])
-    print('train_txtfiles ',cfg['train_txtfiles'])
-    print('classes ',cfg['classes'])
-    print('n_cutoff_imgs ',cfg['n_cutoff_imgs'])
-    print('dataset ',cfg['dataset'])
-
-    hsi_train_dataset = HSIDataset(cfg['dataset_dir'], cfg['train_txtfiles'],
-                                   cfg['classes'], cfg['n_cutoff_imgs'], cfg['dataset'])
-
+    print("Loading Spatial Transcriptomics dataset...")
+    print('dataset_dir:', cfg['dataset_dir'])
+    print('classes:', cfg['classes'])
+    print('batch_size:', cfg['batch_size'])
+    print('num_workers:', cfg['num_workers'])
     
-    # Set params for pliting the dataset in to train and val subset with a ratio 0.9 : 0.1
-    train_rate = 0.9
-    num_train = len(hsi_train_dataset)
-    indx = list(range(num_train))
-    split_point = int(np.floor(train_rate * num_train))
-
-    # Get the train dataloader
-    train_dataloader = torch.utils.data.DataLoader(hsi_train_dataset,
-                                                   batch_size=cfg['batch_size'],
-                                                   sampler=torch.utils.data.sampler.SubsetRandomSampler(
-                                                       indx[:split_point]),
-                                                   pin_memory=True, num_workers=cfg['num_workers'])
-
-    # Get the train dataloader
-    val_dataloader = torch.utils.data.DataLoader(hsi_train_dataset,
-                                                 batch_size=cfg['batch_size'],
-                                                 sampler=torch.utils.data.sampler.SubsetRandomSampler(
-                                                     indx[split_point:]),
-                                                 pin_memory=True, num_workers=cfg['num_workers'])
-    # Get the testloader
-    hsi_test_dataset = HSIDataset(cfg['dataset_dir'], cfg['test_txtfiles'],
-                                  cfg['classes'], cfg['n_cutoff_imgs'], cfg['dataset'])
-    test_dataloader = torch.utils.data.DataLoader(hsi_test_dataset,
-                                                  batch_size=1,  # restrict to 1 as we have a function to display one image
-                                                  pin_memory=True, num_workers=cfg['num_workers'])
-
-    # Return the dataloaders
-    return train_dataloader, val_dataloader, test_dataloader
-
+    # Import and use spatial transcriptomics dataloader
+    from utils.datasets import get_spatial_transcriptomics_dataloaders
+    return get_spatial_transcriptomics_dataloaders(
+        data_dir=cfg['dataset_dir'],
+        batch_size=cfg['batch_size'],
+        num_workers=cfg['num_workers']
+    )
 
 def init_obj(module_name, module_args, module, *args, **kwargs):
     """
@@ -381,93 +349,272 @@ def init_obj(module_name, module_args, module, *args, **kwargs):
     return getattr(module, module_name)(*args, **module_args)
 
 
-def convert_prob2seg(y_prob, classes, y_gt=None, mask=None):
+def convert_prob2seg_dynamic(y_prob, available_classes, y_gt=None, mask=None, ignore_index=0):
     """
-    Convert the class-probability image into the segmentation image
-    :param y_prob: class-probability image with a size of n_classes x H x W
-    :param classes: list of classes in image y
-    :return: 2D array, a segmentation image with a size of H x W
+    Convert class-probability image into segmentation with dynamic classes
+    :param y_prob: class-probability image with size n_classes x H x W
+    :param available_classes: list of classes present in this sample (e.g., [1,2,3] or [3,4,5])
+    :param y_gt: ground truth for masking (optional)
+    :param mask: whether to apply masking
+    :param ignore_index: index to ignore (default: 0)
+    :return: 2D array, segmentation image with size H x W
     """
-    if mask:
-        y_prob[0] = 0
+    if mask and ignore_index == 0:
+        y_prob[0] = 0  # Zero out background probability
+    
     y_class = np.argmax(y_prob, axis=0)
-    if mask:
-        y_class[y_gt == 0] = 0
-    y_seg = np.zeros((y_prob.shape[1], y_prob.shape[2]))
+    
+    # Initialize segmentation with ignore_index
+    y_seg = np.full((y_prob.shape[1], y_prob.shape[2]), ignore_index, dtype=np.int8)
+    
+    # Map probability indices to actual class labels
+    for prob_idx, class_label in enumerate(available_classes):
+        if class_label != ignore_index:  # Skip ignore class
+            indx = np.where(y_class == prob_idx)
+            if len(indx[0]) > 0:
+                y_seg[indx] = class_label
+    
+    # Apply ignore mask if provided
+    if mask and y_gt is not None:
+        y_seg[y_gt == ignore_index] = ignore_index
+    
+    return y_seg
 
-    for k, class_label in enumerate(classes):
-        # Find indices in y_class whose pixels are k
-        indx = np.where(y_class == k)
-        if len(indx[0] > 0):
-            y_seg[indx] = class_label
 
-    return np.int8(y_seg)
-
-
-def compute_confusion_matrix(y_gt, y_pr, classes=[0, 1, 2, 3, 4]):
+def compute_confusion_matrix_dynamic(y_gt, y_pr, all_possible_classes=None, ignore_index=0):
     """
-    :param y_gt: array of size (batchsize, 1, H, W)
-    :param y_pr: array of size (batchsize, n_classes, H, W)
-    :param classes: list of class labels
-    :return: confusion matrix of the y_gt and segmentation of y_pr
+    Compute confusion matrix handling samples with different class sets
+    :param y_gt: ground truth labels
+    :param y_pr: predictions (probabilities or labels)
+    :param all_possible_classes: all possible classes across dataset (e.g., [1,2,3,4,5])
+    :param ignore_index: index to ignore
+    :return: confusion matrix
     """
-    cm = 0
+    if all_possible_classes is None:
+        # Automatically determine all classes from ground truth
+        all_classes = []
+        for k in range(y_gt.shape[0]):
+            unique_classes = np.unique(y_gt[k])
+            all_classes.extend(unique_classes)
+        all_possible_classes = sorted(list(set(all_classes)))
+        # Remove ignore_index if present
+        if ignore_index in all_possible_classes:
+            all_possible_classes.remove(ignore_index)
+    
+    cm = np.zeros((len(all_possible_classes), len(all_possible_classes)), dtype=np.int64)
+    
     for k in range(y_gt.shape[0]):
-        # Convert the current y_pr in to the segmentation
-        y_prk = convert_prob2seg(np.squeeze(y_pr[k, ...]), classes, y_gt=y_gt).flatten()
+        # Get predictions and ground truth for this sample
+        if len(y_pr[k].shape) > 2:  # If predictions are probabilities
+            y_prk = np.argmax(y_pr[k], axis=0)
+            # Get available classes for this sample
+            available_classes = []
+            for i in range(y_pr[k].shape[0]):
+                if np.any(y_pr[k][i] > 0):  # Check if this class channel has any activation
+                    available_classes.append(all_possible_classes[i] if i < len(all_possible_classes) else ignore_index)
+        else:
+            y_prk = y_pr[k]
+            available_classes = all_possible_classes
+        
+        y_gtk = y_gt[k].squeeze() if len(y_gt[k].shape) > 2 else y_gt[k]
+        
+        # Create mask for valid pixels
+        valid_mask = (y_gtk != ignore_index)
+        
+        if valid_mask.sum() == 0:
+            continue
+        
+        # Apply mask
+        y_prk_valid = y_prk[valid_mask]
+        y_gtk_valid = y_gtk[valid_mask]
+        
+        # Use sklearn with explicit labels
+        sample_cm = sklearn_confusion_matrix(
+            y_gtk_valid.flatten(), 
+            y_prk_valid.flatten(), 
+            labels=all_possible_classes
+        )
+        
+        cm += sample_cm
+    
+    return cm, all_possible_classes
 
-        # Get the kth ground-truth segmentaion
-        y_gtk = np.squeeze(y_gt[k, ...]).flatten()
 
-        # Sum up the confusion matrix
-        cm = cm + confusion_matrix(y_gtk, y_prk, labels=classes)
-
-    return cm
-
-def compute_eval_from_cm(confusion_matrix):
+def compute_eval_from_cm_robust(confusion_matrix, class_names=None):
     """
-        Calculate various performance metrics from a confusion matrix.
-
-        Parameters:
-        - confusion_matrix (numpy.ndarray): The confusion matrix.
-
-        Returns:
-        - pixel_acc (float): Pixel accuracy.
-        - mean_acc (float): Mean accuracy.
-        - mean_IoU (float): Mean Intersection over Union.
-        - IoU_array (numpy.ndarray): Intersection over Union for each class.
-        - dice (float): Dice coefficient.
-        - kappa (float): Cohen's Kappa coefficient.
-        """
-
+    Calculate performance metrics with robust handling of missing classes
+    :param confusion_matrix: confusion matrix
+    :param class_names: optional list of class names for better reporting
+    :return: metrics dictionary
+    """
+    # Add small epsilon to avoid division by zero
+    eps = 1e-10
+    
     # Calculate pixel accuracy
-    pixel_acc = np.trace(confusion_matrix) / np.sum(confusion_matrix)
-
-    # Calculate mean accuracy
-    mean_acc = np.diag(confusion_matrix) / (np.sum(confusion_matrix, axis=1)+1e-10)
-    mean_acc = np.nanmean(mean_acc)
-
-    # Calculate IoU (Intersection over Union) for each class
+    pixel_acc = np.trace(confusion_matrix) / (np.sum(confusion_matrix) + eps)
+    
+    # Calculate per-class accuracy
+    per_class_acc = np.diag(confusion_matrix) / (np.sum(confusion_matrix, axis=1) + eps)
+    mean_acc = np.nanmean(per_class_acc)
+    
+    # Calculate IoU for each class
     true_positives = np.diag(confusion_matrix)
     false_positives = np.sum(confusion_matrix, axis=0) - true_positives
     false_negatives = np.sum(confusion_matrix, axis=1) - true_positives
-
-    IoU_array = true_positives / ((true_positives + false_positives + false_negatives)+1e-10)
-
-    # Calculate mean IoU
+    
+    IoU_array = true_positives / (true_positives + false_positives + false_negatives + eps)
     mean_IoU = np.nanmean(IoU_array)
-
+    
     # Calculate Dice coefficient
-    dice = (2 * true_positives) / ((2 * true_positives + false_positives + false_negatives)+1e-10)
-
-    # Calculate Cohen's Kappa coefficient
+    dice_array = (2 * true_positives) / (2 * true_positives + false_positives + false_negatives + eps)
+    mean_dice = np.nanmean(dice_array)
+    
+    # Calculate F1 score
+    precision = true_positives / (true_positives + false_positives + eps)
+    recall = true_positives / (true_positives + false_negatives + eps)
+    f1_array = 2 * (precision * recall) / (precision + recall + eps)
+    mean_f1 = np.nanmean(f1_array)
+    
+    # Calculate Cohen's Kappa
     total_sum = np.sum(confusion_matrix)
     observed_accuracy = np.trace(confusion_matrix) / total_sum
     expected_accuracy = (np.sum(confusion_matrix, axis=0) / total_sum) @ (np.sum(confusion_matrix, axis=1) / total_sum)
-    kappa = (observed_accuracy - expected_accuracy) / (1 - expected_accuracy)
+    kappa = (observed_accuracy - expected_accuracy) / (1 - expected_accuracy + eps)
+    
+    # Create results dictionary
+    results = {
+        'pixel_accuracy': pixel_acc,
+        'mean_accuracy': mean_acc,
+        'per_class_accuracy': per_class_acc,
+        'mean_IoU': mean_IoU,
+        'IoU_per_class': IoU_array,
+        'mean_dice': mean_dice,
+        'dice_per_class': dice_array,
+        'mean_f1': mean_f1,
+        'f1_per_class': f1_array,
+        'precision_per_class': precision,
+        'recall_per_class': recall,
+        'kappa': kappa
+    }
+    
+    # Add class names if provided
+    if class_names is not None:
+        for metric in ['per_class_accuracy', 'IoU_per_class', 'dice_per_class', 'f1_per_class', 'precision_per_class', 'recall_per_class']:
+            results[f'{metric}_named'] = dict(zip(class_names, results[metric]))
+    
+    return results
 
-    return pixel_acc, mean_acc, mean_IoU, IoU_array, np.nanmean(dice), np.nanmean(kappa)
 
+def show_visual_results_dynamic(x, y_gt, y_pr, available_classes, all_classes=None,
+                               show_visual=False, comet=None, fig_name="", ignore_index=0):
+    """
+    Show visualization with support for dynamic classes
+    :param x: input image (batchsize, n_bands, H, W)
+    :param y_gt: ground truth (batchsize, 1, H, W)
+    :param y_pr: predictions (batchsize, n_classes, H, W)
+    :param available_classes: classes available in this sample
+    :param all_classes: all possible classes in dataset
+    :param show_visual: whether to display
+    :param comet: comet logger
+    :param fig_name: figure name
+    :param ignore_index: index to ignore
+    :return: None
+    """
+    # Select first image in batch
+    y_gt = y_gt[0, ...]
+    y_pr = y_pr[0, ...]
+    x = x[0, ...]
+    x = np.moveaxis(x, [0, 1, 2], [2, 0, 1])
+    
+    # Convert probabilities to segmentation
+    y_pr_seg = convert_prob2seg_dynamic(y_pr, available_classes, y_gt, mask=True, ignore_index=ignore_index)
+    
+    # Set up figure
+    if plt.fignum_exists(1):
+        plt.close()
+    fig = plt.figure(figsize=(12, 4))
+    fig.subplots_adjust(bottom=0.3)
+    
+    # Create colormap for all possible classes
+    if all_classes is None:
+        all_classes = sorted(list(set(np.unique(y_gt)) | set(available_classes)))
+        if ignore_index in all_classes:
+            all_classes.remove(ignore_index)
+        all_classes = [ignore_index] + all_classes  # Add ignore_index at the beginning
+    
+    # Define colors (extend as needed)
+    base_colors = ['black', 'green', 'blue', 'red', 'yellow', 'cyan', 'magenta', 'orange', 'purple', 'brown']
+    colors = base_colors[:len(all_classes)]
+    
+    # Create colormaps
+    cmap_gt = mpl.colors.ListedColormap(colors[:np.max(all_classes)+1])
+    cmap_pr = mpl.colors.ListedColormap(colors[:np.max(all_classes)+1])
+    
+    # Plot pseudo-color image
+    plt.subplot(131)
+    plt.imshow(hsi_img2rgb(x))
+    plt.title('Pseudo-color image')
+    plt.axis('off')
+    
+    # Plot ground truth
+    ax = plt.subplot(132)
+    im = ax.imshow(y_gt, cmap=cmap_gt, vmin=0, vmax=max(all_classes))
+    plt.title(f'Ground-truth\nClasses: {sorted(np.unique(y_gt))}')
+    plt.axis('off')
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
+    # Plot prediction
+    ax = plt.subplot(133)
+    im = ax.imshow(y_pr_seg, cmap=cmap_pr, vmin=0, vmax=max(all_classes))
+    plt.title(f'Prediction\nClasses: {sorted(np.unique(y_pr_seg))}')
+    plt.axis('off')
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    
+    plt.tight_layout()
+    
+    if fig_name:
+        plt.savefig(fig_name, dpi=300, bbox_inches='tight')
+    
+    if show_visual:
+        plt.show()
+    
+    if comet is not None:
+        comet.log_figure(figure_name=fig_name, figure=fig)
+
+
+# Usage example for dynamic class handling
+class ClassTracker:
+    """Helper class to track classes across samples and dataset"""
+    
+    def __init__(self, ignore_index=0):
+        self.ignore_index = ignore_index
+        self.all_classes = set()
+        self.sample_classes = {}
+    
+    def update(self, sample_id, ground_truth, predictions=None):
+        """Update class tracking with new sample"""
+        # Extract classes from ground truth
+        gt_classes = set(np.unique(ground_truth)) - {self.ignore_index}
+        self.sample_classes[sample_id] = gt_classes
+        self.all_classes.update(gt_classes)
+        
+        # Extract classes from predictions if provided
+        if predictions is not None and len(predictions.shape) > 2:
+            # For probability predictions, check which channels have activations
+            pred_classes = set()
+            for i in range(predictions.shape[0]):
+                if np.any(predictions[i] > 0.1):  # Threshold for active channels
+                    pred_classes.add(i + 1)  # Assuming classes start from 1
+            self.all_classes.update(pred_classes)
+    
+    def get_all_classes(self):
+        """Get sorted list of all classes"""
+        return sorted(list(self.all_classes))
+    
+    def get_sample_classes(self, sample_id):
+        """Get classes for specific sample"""
+        return sorted(list(self.sample_classes.get(sample_id, set())))
+    
 def cohen_kappa_score(confusion):
     r"""Cohen's kappa: a statistic that measures inter-annotator agreement.
 
