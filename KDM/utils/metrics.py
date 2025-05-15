@@ -62,55 +62,60 @@ class DynamicClassMetrics:
                 self.sample_classes[sample_id].update(sample_classes)
     
     def compute_metrics(self, mask=True):
-        """
-        Compute all metrics across accumulated data
-        :param mask: Whether to apply ignore_index masking
-        :return: Dictionary of computed metrics
-        """
-        if not self.all_predictions:
-            return {}
-            
-        # Concatenate all data
-        all_preds = torch.cat(self.all_predictions, dim=0)
-        all_targets = torch.cat(self.all_targets, dim=0)
-        
-        # Get all unique classes across dataset
-        all_classes = set()
-        for classes in self.sample_classes.values():
-            all_classes.update(classes)
-        all_classes = sorted(list(all_classes))
-        
-        if not all_classes:  # Fallback if no classes found
-            all_classes = [1, 2, 3, 4, 5]
-        
-        # Convert to probability format for metric classes
-        num_classes = max(all_classes) + 1
-        preds_prob = torch.zeros(all_preds.shape[0], num_classes, *all_preds.shape[1:])
-        preds_prob.scatter_(1, all_preds.unsqueeze(1).long(), 1)
-        
-        # Initialize metrics with dynamic classes
-        metrics = {
-            'accuracy': Accuracy(ignore_index=self.ignore_index),
-            'mean_iou': MeanIoU(ignore_index=self.ignore_index, classes=all_classes),
-            'macro_iou': MacroIoU(ignore_index=self.ignore_index, classes=all_classes),
-            'dice': Dice(ignore_index=self.ignore_index, classes=all_classes),
-        }
-        
-        # Compute metrics
-        results = {}
-        for name, metric in metrics.items():
-            results[name] = metric(preds_prob, all_targets, mask=mask).item()
-        
-        # Add standalone metrics
-        results['kappa'] = kappa(preds_prob, all_targets, mask=mask, ignore_index=self.ignore_index, classes=all_classes)
-        results['average_accuracy'] = average_accuracy(preds_prob, all_targets, mask=mask, ignore_index=self.ignore_index, classes=all_classes)
-        
-        # Add per-class metrics
-        results['per_class_iou'] = self._compute_per_class_iou(all_preds, all_targets, all_classes)
-        results['per_class_dice'] = self._compute_per_class_dice(all_preds, all_targets, all_classes)
-        
-        return results
-    
+      """
+      Compute all metrics across accumulated data
+      :param mask: Whether to apply ignore_index masking
+      :return: Dictionary of computed metrics
+      """
+      if not self.all_predictions:
+          return {}
+          
+      # Concatenate all data
+      all_preds = torch.cat(self.all_predictions, dim=0)
+      all_targets = torch.cat(self.all_targets, dim=0)
+      
+      # Get all unique classes across dataset
+      all_classes = set()
+      for classes in self.sample_classes.values():
+          all_classes.update(classes)
+      all_classes = sorted(list(all_classes))
+      
+      if not all_classes:  # Fallback if no classes found
+          all_classes = [1, 2, 3, 4, 5]
+      
+      # Convert to probability format for metric classes
+      num_classes = max(all_classes) + 1
+      preds_prob = torch.zeros(all_preds.shape[0], num_classes, *all_preds.shape[1:])
+      preds_prob.scatter_(1, all_preds.unsqueeze(1).long(), 1)
+      
+      # Initialize metrics with dynamic classes
+      metrics = {
+          'accuracy': Accuracy(ignore_index=self.ignore_index),
+          'mean_iou': MeanIoU(ignore_index=self.ignore_index, classes=all_classes),
+          'macro_iou': MacroIoU(ignore_index=self.ignore_index, classes=all_classes),
+          'dice': Dice(ignore_index=self.ignore_index, classes=all_classes),
+      }
+      
+      # Compute metrics - FIX: Handle both tensor and float returns
+      results = {}
+      for name, metric in metrics.items():
+          result = metric(preds_prob, all_targets, mask=mask)
+          # Check if result is tensor or already a scalar
+          if torch.is_tensor(result):
+              results[name] = result.item()
+          else:
+              results[name] = float(result)  # Ensure it's a float
+      
+      # Add standalone metrics - these already return floats
+      results['kappa'] = kappa(preds_prob, all_targets, mask=mask, ignore_index=self.ignore_index, classes=all_classes)
+      results['average_accuracy'] = average_accuracy(preds_prob, all_targets, mask=mask, ignore_index=self.ignore_index, classes=all_classes)
+      
+      # Add per-class metrics
+      results['per_class_iou'] = self._compute_per_class_iou(all_preds, all_targets, all_classes)
+      results['per_class_dice'] = self._compute_per_class_dice(all_preds, all_targets, all_classes)
+      
+      return results
+      
     def _compute_per_class_iou(self, predictions, targets, classes):
         """Compute IoU for each class separately"""
         iou_scores = {}

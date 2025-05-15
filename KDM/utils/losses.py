@@ -34,42 +34,61 @@ class SpatialTranscriptomicsLoss(nn.Module):
         
         # Initialize loss components
         self.ce_loss = nn.CrossEntropyLoss(ignore_index=ignore_index, weight=class_weights)
-        self.dice_loss = DiceLoss(ignore_index=ignore_index)
+        self.dice_loss = self._create_dice_loss(ignore_index)
         self.focal_loss = FocalLoss(gamma=focal_gamma)
+    
+    def _create_dice_loss(self, ignore_index):
+        """Create dice loss that handles ignore_index properly"""
+        class CustomDiceLoss(nn.Module):
+            def __init__(self, ignore_index=0):
+                super().__init__()
+                self.ignore_index = ignore_index
+                
+            def forward(self, pred, target):
+                # Apply softmax to predictions - FIXED: Use func instead of F
+                pred = func.softmax(pred, dim=1)
+                
+                # Convert target to one-hot (excluding ignore_index)
+                num_classes = pred.shape[1]
+                target_one_hot = torch.zeros_like(pred)
+                
+                # Create mask for valid pixels
+                valid_mask = (target != self.ignore_index)
+                
+                # Fill one-hot encoding only for valid pixels
+                for i in range(num_classes):
+                    if i != self.ignore_index:
+                        class_mask = (target == i) & valid_mask
+                        target_one_hot[:, i][class_mask] = 1.0
+                
+                # Compute Dice loss for each class
+                dice_scores = []
+                for i in range(num_classes):
+                    if i != self.ignore_index:
+                        intersection = (pred[:, i] * target_one_hot[:, i]).sum()
+                        union = pred[:, i].sum() + target_one_hot[:, i].sum()
+                        dice = (2.0 * intersection) / (union + 1e-8)
+                        dice_scores.append(1 - dice)
+                
+                return torch.stack(dice_scores).mean()
         
+        return CustomDiceLoss(ignore_index)
+    
     def forward(self, predictions, targets, sample_info=None):
-        """
-        Forward pass with support for dynamic classes
-        :param predictions: Model predictions (B, C, H, W)
-        :param targets: Ground truth (B, H, W) or (B, 1, H, W)
-        :param sample_info: Optional dict with sample-specific info
-        :return: Combined loss
-        """
+        """Forward pass with support for dynamic classes"""
         if targets.dim() == 4:
             targets = targets.squeeze(1)
             
         # Cross-entropy loss
         ce_loss = self.ce_loss(predictions, targets.long())
         
-        # Create one-hot for dice loss (excluding ignore_index)
-        num_classes = predictions.shape[1]
-        targets_one_hot = torch.zeros_like(predictions)
-        
-        # Create mask for valid pixels
-        valid_mask = (targets != self.ignore_index)
-        
-        # Fill one-hot encoding only for valid pixels
-        for i in range(num_classes):
-            if i != self.ignore_index:
-                class_mask = (targets == i) & valid_mask
-                targets_one_hot[:, i][class_mask] = 1.0
-        
         # Dice loss
-        dice_loss = self.dice_loss(predictions, targets_one_hot)
+        dice_loss = self.dice_loss(predictions, targets)
         
         # Focal loss (apply mask afterwards)
         focal_loss = self.focal_loss(predictions, targets.long())
-        focal_loss = focal_loss * valid_mask.float()
+        valid_mask = (targets != self.ignore_index).float()
+        focal_loss = focal_loss * valid_mask
         focal_loss = focal_loss.sum() / (valid_mask.sum() + 1e-8)
         
         # Combine losses
@@ -115,7 +134,6 @@ class DiceLoss(base.Loss):
 
 
 class FocalLoss(nn.Module):
-
     def __init__(self, weight=None,
                  gamma=2., reduction='none'):
         nn.Module.__init__(self)
@@ -126,7 +144,7 @@ class FocalLoss(nn.Module):
     def forward(self, input_tensor, target_tensor):
         log_prob = nn.functional.log_softmax(input_tensor, dim=-1)
         prob = torch.exp(log_prob)
-        return F.nll_loss(
+        return func.nll_loss(  # Changed from F.nll_loss to func.nll_loss
             ((1 - prob) ** self.gamma) * log_prob,
             target_tensor,
             weight=self.weight,

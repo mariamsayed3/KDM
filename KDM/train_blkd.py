@@ -26,9 +26,10 @@ import utils.losses
 import utils.metrics
 import models.hsi_net
 from models.hsi_net import HSINet, Res_SGR_Net, SpatialTranscriptomics_SGR_Net
+from utils.metrics import DynamicClassMetrics
 from utils.utils import (create_exp_dir, init_obj, test_running_time,
                         compute_confusion_matrix_dynamic, compute_eval_from_cm_robust,
-                        ClassTracker, DynamicClassMetrics, show_visual_results_dynamic)
+                        ClassTracker, show_visual_results_dynamic)
 from utils.datasets import get_spatial_transcriptomics_dataloaders
 
 
@@ -42,16 +43,22 @@ def main(cfg, comet):
     
     # Create teacher model (multi-head model like SGR_Net)
     teacher_params = cfg['teacher_params']
-    teacher_model = getattr(models.hsi_net, teacher_params['name'])(
-        n_bands=teacher_params['n_bands'],
-        classes=teacher_params['classes'],
-        nf_enc=teacher_params['nf_enc'],
-        nf_dec=teacher_params['nf_dec'],
-        do_batchnorm=teacher_params['do_batchnorm'],
-        n_heads=teacher_params['n_heads'],
-        max_norm_val=None,
-        rates=teacher_params.get('rates', [1, 2, 3, 4])
-    )
+    teacher_model_class = getattr(models.hsi_net, teacher_params['name'])
+    teacher_kwargs = {
+        'n_bands': teacher_params['n_bands'],
+        'classes': teacher_params['classes'],
+        'nf_enc': teacher_params['nf_enc'],
+        'nf_dec': teacher_params['nf_dec'],
+        'do_batchnorm': teacher_params['do_batchnorm'],
+        'max_norm_val': None
+    }
+
+    # Add multi-head specific parameters only if needed
+    if 'SGR' in teacher_params['name'] or 'Res_' in teacher_params['name']:
+        teacher_kwargs['n_heads'] = teacher_params.get('n_heads', 5)
+        teacher_kwargs['encoder_name'] = teacher_params.get('encoder_name', None)
+
+    teacher_model = teacher_model_class(**teacher_kwargs)
     
     # Create student model (single head)
     student_params = cfg['student_params']
@@ -291,8 +298,16 @@ def train_epoch_blkd(optimizer, student_model, teacher_model, teacher_head_id,
             teacher_o = teacher_o_list[teacher_head_id] if isinstance(teacher_o_list, list) else teacher_o_list
         
         # Update class tracker
+        # Fix for both locations
         for i, sample_id in enumerate(sample_ids):
-            class_tracker.update(sample_id, y_seg[i].cpu().numpy())
+            # Handle tensor shape properly
+            if y_seg.dim() == 4:  # [B, C, H, W]
+                mask_data = y_seg[i, 0].cpu().numpy()
+            elif y_seg.dim() == 3:  # [B, H, W]
+                mask_data = y_seg[i].cpu().numpy()
+            else:
+                mask_data = y_seg.cpu().numpy()
+            class_tracker.update(sample_id, mask_data)
         
         # Compute block knowledge distillation loss
         loss = loss_fn(student_o, teacher_o, student_f, teacher_f, y_seg)
@@ -346,8 +361,16 @@ def val_epoch_blkd(student_model, teacher_model, teacher_head_id, val_loader,
             teacher_o = teacher_o_list[teacher_head_id] if isinstance(teacher_o_list, list) else teacher_o_list
             
             # Update class tracker
+            # Fix for both locations
             for i, sample_id in enumerate(sample_ids):
-                class_tracker.update(sample_id, y_seg[i].cpu().numpy())
+                # Handle tensor shape properly
+                if y_seg.dim() == 4:  # [B, C, H, W]
+                    mask_data = y_seg[i, 0].cpu().numpy()
+                elif y_seg.dim() == 3:  # [B, H, W]
+                    mask_data = y_seg[i].cpu().numpy()
+                else:
+                    mask_data = y_seg.cpu().numpy()
+                class_tracker.update(sample_id, mask_data)
             
             # Compute loss
             loss = loss_fn(student_o, teacher_o, student_f, teacher_f, y_seg)
@@ -399,7 +422,16 @@ def testing_blkd_with_dynamic_classes(model, test_loader, metric, device, comet,
             _, o = model(x)
             
             # Update class tracker and metrics
-            class_tracker.update(sample_id, y_seg[0].cpu().numpy())
+            # Handle batch processing properly
+            batch_size = y_seg.size(0)
+            for batch_idx in range(batch_size):
+                if y_seg.dim() == 4:
+                    sample_mask = y_seg[batch_idx, 0].cpu().numpy()
+                else:
+                    sample_mask = y_seg[batch_idx].cpu().numpy()
+                
+                batch_sample_id = f"{sample_id}_batch_{batch_idx}"
+                class_tracker.update(batch_sample_id, sample_mask)
             test_metrics.update(o, y_seg, [sample_id], probabilities=True)
             
             # Store for final evaluation
@@ -471,14 +503,33 @@ def testing_blkd_with_dynamic_classes(model, test_loader, metric, device, comet,
     # Log confusion matrix
     comet.log_confusion_matrix(matrix=confusion_matrix, labels=[str(c) for c in class_labels])
     
-    # Save results
-    import json
+        # Before line 440, add:
+        import json
+
+    def convert_numpy_types(obj):
+            """Convert numpy types to Python native types for JSON serialization"""
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_types(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            elif isinstance(obj, set):
+                return [convert_numpy_types(item) for item in obj]
+            else:
+                return obj
+
+        # Then modify the save section:
     results_summary = {
-        'metrics': comprehensive_metrics,
-        'class_summary': class_summary,
-        'all_classes': all_classes,
-        'method': 'block_knowledge_distillation'
-    }
+            'metrics': convert_numpy_types(comprehensive_metrics),
+            'class_summary': convert_numpy_types(class_summary),
+            'all_classes': convert_numpy_types(all_classes),
+            'method': 'block_knowledge_distillation'
+        }
     
     with open(f'{save_dir}/test_results.json', 'w') as f:
         json.dump(results_summary, f, indent=2)

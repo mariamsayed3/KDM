@@ -46,16 +46,27 @@ def main(cfg, comet):
     
     # Create the model
     m_params = cfg['model_params']
-    model = getattr(models.hsi_net, m_params['name'])(
-        n_bands=m_params['n_bands'],
-        classes=m_params['classes'],
-        nf_enc=m_params['nf_enc'],
-        nf_dec=m_params['nf_dec'],
-        do_batchnorm=m_params['do_batchnorm'],
-        n_heads=m_params['n_heads'],
-        max_norm_val=None,
-        encoder_name=m_params['encoder_name']
-    )
+
+  # New code - handles both HSINet and SGR_Net variants
+    model_class = getattr(models.hsi_net, m_params['name'])
+
+    # Base parameters that all models accept
+    model_kwargs = {
+        'n_bands': m_params['n_bands'],
+        'classes': m_params['classes'],
+        'nf_enc': m_params['nf_enc'],
+        'nf_dec': m_params['nf_dec'],
+        'do_batchnorm': m_params['do_batchnorm'],
+        'max_norm_val': None
+    }
+
+    # Add SGR_Net specific parameters only if needed
+    if 'SGR' in m_params['name'] or 'Res_' in m_params['name']:
+        model_kwargs['n_heads'] = m_params.get('n_heads', 3)
+        model_kwargs['encoder_name'] = m_params.get('encoder_name', 'resnet50')
+
+    # Create the model
+    model = model_class(**model_kwargs)
     
     # Get dataloaders for spatial transcriptomics
     print("Loading spatial transcriptomics dataloaders...")
@@ -139,10 +150,15 @@ def main(cfg, comet):
     print("\nThe training has completed. Testing the model now...")
     saved = torch.load(cfg['train_params']['save_dir'] + '/best_model.pth')
     model.load_state_dict(saved)
-    
-    # Enhanced testing with dynamic classes
+
+        # Get n_heads with proper default handling
+    if 'SGR' in m_params['name'] or 'Res_' in m_params['name']:
+        n_heads = m_params.get('n_heads', 3)
+    else:
+        n_heads = 1  # HSINet is single-head
+
     testing_with_dynamic_classes(model, test_loader, metric, device, 
-                                m_params['n_heads'], comet, 
+                                n_heads, comet, 
                                 cfg['train_params']['save_dir'], class_tracker)
     
     comet.log_asset(cfg['train_params']['save_dir'] + '/best_model.pth')
@@ -220,7 +236,7 @@ def training_with_dynamic_classes(train_cfg, trainer, train_loader, val_loader, 
 
 def testing_with_dynamic_classes(model, test_loader, metric, device, n_heads, 
                                 comet, save_dir, class_tracker):
-    """Enhanced testing with dynamic class support"""
+    """Enhanced testing with dynamic class support for both single and multi-head models"""
     vis_path = f'{save_dir}/visual'
     os.makedirs(vis_path, exist_ok=True)
     
@@ -230,8 +246,11 @@ def testing_with_dynamic_classes(model, test_loader, metric, device, n_heads,
     model.eval()
     pbar = tqdm(test_loader, ncols=80, desc='Testing')
     
-    # Storage for multi-head outputs
-    all_predictions = [[] for _ in range(n_heads)]
+    # Storage for outputs - FIX: Correct initialization based on model type
+    if n_heads > 1:
+        all_predictions = [[] for _ in range(n_heads)]
+    else:
+        all_predictions = []
     all_targets = []
     all_sample_ids = []
     
@@ -240,94 +259,240 @@ def testing_with_dynamic_classes(model, test_loader, metric, device, n_heads,
             # Get batch data
             x = minibatch['input'].to(device)
             y_seg = minibatch['ground_truth_seg'].to(device)
+            y_oht = minibatch['ground_truth_onehot'].to(device)
             sample_id = minibatch.get('name', [f'test_{step}'])[0]
             
-            # Forward pass
-            f_results, o_results = model(x)
+            # DEBUG: Check what classes are in this sample
+            if step < 3:
+                unique_classes = torch.unique(y_seg).cpu().numpy()
+                print(f"Sample {sample_id}: unique classes = {unique_classes}")
+                print(f"Sample shape: {y_seg.shape}")
+                print(f"Using {n_heads} heads evaluation")
             
-            # Interpolate outputs to match ground truth size
-            o_results = [F.interpolate(o, size=(y_seg.size(-2), y_seg.size(-1)), 
-                                     mode='nearest') for o in o_results]
+            # Forward pass - FIX: Proper handling for multi-head models
+            model_output = model(x)
             
-            # Update class tracker
-            class_tracker.update(sample_id, y_seg[0].cpu().numpy())
+            if n_heads > 1:  # Multi-head model
+                if isinstance(model_output, tuple) and len(model_output) == 2:
+                    f_results, o_results = model_output
+                    
+                    # Interpolate each head output to match ground truth size
+                    o_results = [F.interpolate(o, size=(y_seg.size(-2), y_seg.size(-1)), 
+                                             mode='nearest') for o in o_results]
+                    
+                    # Store predictions for each head
+                    for i in range(n_heads):
+                        if i < len(o_results):  # Make sure head exists
+                            all_predictions[i].append(o_results[i].cpu())
+                else:
+                    print(f"Warning: Expected tuple output for multi-head model, got {type(model_output)}")
+                    # Fallback - treat as single output
+                    o_results = [model_output]
+                    for i in range(min(n_heads, len(o_results))):
+                        all_predictions[i].append(o_results[i].cpu())
+            else:  # Single-head model
+                if isinstance(model_output, tuple):
+                    f_results, o_results = model_output
+                else:
+                    o_results = model_output
+                
+                # Interpolate single output
+                o_results = F.interpolate(o_results, size=(y_seg.size(-2), y_seg.size(-1)), 
+                                        mode='nearest')
+                all_predictions.append(o_results.cpu())
             
-            # Store predictions and targets
-            for i in range(n_heads):
-                all_predictions[i].append(o_results[i].cpu())
+            # Update class tracker for each sample in batch
+            batch_size = y_seg.size(0)
+            for batch_idx in range(batch_size):
+                if y_seg.dim() == 4:
+                    sample_mask = y_seg[batch_idx, 0].cpu().numpy()
+                else:
+                    sample_mask = y_seg[batch_idx].cpu().numpy()
+                
+                batch_sample_id = f"{sample_id}_batch_{batch_idx}"
+                class_tracker.update(batch_sample_id, sample_mask)
+                
+                if step < 3 and batch_idx < 2:
+                    unique_in_sample = np.unique(sample_mask)
+                    print(f"  Batch {batch_idx}: shape={sample_mask.shape}, unique={unique_in_sample}")
+                    tracked_classes = class_tracker.get_sample_classes(batch_sample_id)
+                    print(f"  Tracked classes for {batch_sample_id}: {tracked_classes}")
+            
+            # Store targets and sample IDs
             all_targets.append(y_seg.cpu())
             all_sample_ids.append(sample_id)
             
             # Save visualizations
-            if step < 10:  # Save first 10 samples
-                test_loader.dataset.save_pred(y_seg, sv_path=vis_path, name=f'{sample_id}_gt.png')
-                for i in range(n_heads):
-                    test_loader.dataset.save_pred(o_results[i], sv_path=vis_path, 
-                                                name=f'{sample_id}_head_{i}.png')
+            if step < 10:
+                # Save ground truth
+                if y_seg.dim() == 4:
+                    gt_to_save = y_seg[0:1, 0:1]
+                else:
+                    gt_to_save = y_seg[0:1].unsqueeze(1)
+                test_loader.dataset.save_pred(gt_to_save, sv_path=vis_path, name=f'{sample_id}_gt.png')
+                
+                # Save predictions
+                if n_heads > 1:
+                    for i in range(min(n_heads, len(o_results))):
+                        test_loader.dataset.save_pred(o_results[i][0:1], sv_path=vis_path, 
+                                                    name=f'{sample_id}_head_{i}.png')
+                else:
+                    test_loader.dataset.save_pred(o_results[0:1], sv_path=vis_path, 
+                                                name=f'{sample_id}_pred.png')
     
     # Get all classes found during testing
     all_classes = class_tracker.get_all_classes()
     print(f"\nClasses found during testing: {all_classes}")
+    print(f"Total samples tracked: {len(class_tracker.sample_classes)}")
+    print(f"All classes in tracker: {class_tracker.all_classes}")
     
-    # Evaluate each head
+    # Show sample tracking info
+    sample_ids = list(class_tracker.sample_classes.keys())[:5]
+    for sid in sample_ids:
+        classes_found = class_tracker.get_sample_classes(sid)
+        print(f"{sid}: {classes_found}")
+    
+    # Fallback class handling
+    if not all_classes or all_classes == [0]:
+        print("Warning: Class tracker found no classes. Extracting from data...")
+        all_classes_from_data = set()
+        for targets in all_targets:
+            unique_classes = torch.unique(targets).numpy()
+            all_classes_from_data.update(unique_classes)
+        all_classes_from_data.discard(0)
+        all_classes = sorted(list(all_classes_from_data))
+        if not all_classes:
+            all_classes = [1, 2, 3, 4, 5]
+        print(f"Using classes from data: {all_classes}")
+    
+    # Import evaluation functions
+    from utils.utils import compute_confusion_matrix_dynamic, compute_eval_from_cm_robust
+    
+    # Evaluate based on model type
     results = {}
-    for i in range(n_heads):
-        print(f"\n=== Evaluating Head {i} ===")
+    
+    if n_heads > 1:
+        # Multi-head evaluation
+        print(f"\n=== Evaluating Multi-Head Model ({n_heads} heads) ===")
         
-        # Concatenate predictions for this head
-        head_predictions = torch.cat(all_predictions[i], dim=0)
-        head_targets = torch.cat(all_targets, dim=0)
+        for i in range(n_heads):
+            if len(all_predictions[i]) == 0:
+                print(f"Warning: Head {i} has no predictions")
+                continue
+                
+            print(f"\n--- Head {i} ---")
+            
+            # Concatenate predictions for this head
+            head_predictions = torch.cat(all_predictions[i], dim=0)
+            head_targets = torch.cat(all_targets, dim=0)
+            
+            # Compute metrics
+            confusion_matrix, class_labels = compute_confusion_matrix_dynamic(
+                head_targets.numpy(), 
+                head_predictions.numpy(),
+                all_possible_classes=all_classes,
+                ignore_index=0
+            )
+            
+            metrics = compute_eval_from_cm_robust(confusion_matrix, class_names=[f'class_{c}' for c in class_labels])
+            
+            # Display and log metrics
+            print(f"Head {i} - mIoU: {metrics['mean_IoU']:.4f}")
+            print(f"Head {i} - Pixel Acc: {metrics['pixel_accuracy']:.4f}")
+            print(f"Head {i} - Dice: {metrics['mean_dice']:.4f}")
+            print(f"Head {i} - Kappa: {metrics['kappa']:.4f}")
+            
+            comet.log_metric(f'test_mIoU_head_{i}', metrics['mean_IoU'])
+            comet.log_metric(f'test_pixel_acc_head_{i}', metrics['pixel_accuracy'])
+            comet.log_metric(f'test_dice_head_{i}', metrics['mean_dice'])
+            comet.log_metric(f'test_kappa_head_{i}', metrics['kappa'])
+            
+            results[f'head_{i}'] = metrics
+            
+            # Log confusion matrix for this head
+            comet.log_confusion_matrix(matrix=confusion_matrix, labels=[str(c) for c in class_labels],
+                                     title=f'Confusion Matrix - Head {i}')
         
-        # Compute confusion matrix with dynamic classes
+        # Log average performance across heads
+        if results:
+            avg_miou = np.mean([r['mean_IoU'] for r in results.values()])
+            avg_pixel_acc = np.mean([r['pixel_accuracy'] for r in results.values()])
+            avg_dice = np.mean([r['mean_dice'] for r in results.values()])
+            
+            print(f"\n=== Average Performance Across Heads ===")
+            print(f"Average mIoU: {avg_miou:.4f}")
+            print(f"Average Pixel Acc: {avg_pixel_acc:.4f}")
+            print(f"Average Dice: {avg_dice:.4f}")
+            
+            comet.log_metric('test_avg_mIoU', avg_miou)
+            comet.log_metric('test_avg_pixel_acc', avg_pixel_acc)
+            comet.log_metric('test_avg_dice', avg_dice)
+            
+            results['average'] = {
+                'mean_IoU': avg_miou,
+                'pixel_accuracy': avg_pixel_acc,
+                'mean_dice': avg_dice
+            }
+    
+    else:
+        # Single-head evaluation
+        print(f"\n=== Evaluating Single Head Model ===")
+        
+        all_predictions_tensor = torch.cat(all_predictions, dim=0)
+        all_targets_tensor = torch.cat(all_targets, dim=0)
+        
         confusion_matrix, class_labels = compute_confusion_matrix_dynamic(
-            head_targets.numpy(), 
-            head_predictions.numpy(),
+            all_targets_tensor.numpy(), 
+            all_predictions_tensor.numpy(),
             all_possible_classes=all_classes,
             ignore_index=0
         )
         
-        # Compute comprehensive metrics
         metrics = compute_eval_from_cm_robust(confusion_matrix, class_names=[f'class_{c}' for c in class_labels])
         
-        # Log metrics
-        print(f"Head {i} - mIoU: {metrics['mean_IoU']:.4f}")
-        print(f"Head {i} - Pixel Acc: {metrics['pixel_accuracy']:.4f}")
-        print(f"Head {i} - Mean Acc: {metrics['mean_accuracy']:.4f}")
-        print(f"Head {i} - Dice: {metrics['mean_dice']:.4f}")
-        print(f"Head {i} - Kappa: {metrics['kappa']:.4f}")
+        print(f"mIoU: {metrics['mean_IoU']:.4f}")
+        print(f"Pixel Acc: {metrics['pixel_accuracy']:.4f}")
+        print(f"Dice: {metrics['mean_dice']:.4f}")
+        print(f"Kappa: {metrics['kappa']:.4f}")
         
-        comet.log_metric(f'test_mIoU_head_{i}', metrics['mean_IoU'])
-        comet.log_metric(f'test_pixel_acc_head_{i}', metrics['pixel_accuracy'])
-        comet.log_metric(f'test_mean_acc_head_{i}', metrics['mean_accuracy'])
-        comet.log_metric(f'test_dice_head_{i}', metrics['mean_dice'])
-        comet.log_metric(f'test_kappa_head_{i}', metrics['kappa'])
+        comet.log_metric('test_mIoU', metrics['mean_IoU'])
+        comet.log_metric('test_pixel_acc', metrics['pixel_accuracy'])
+        comet.log_metric('test_dice', metrics['mean_dice'])
+        comet.log_metric('test_kappa', metrics['kappa'])
         
-        # Log per-class metrics
-        print(f"IoU per class: {metrics['IoU_per_class']}")
-        comet.log_metric(f'test_IoU_array_head_{i}', metrics['IoU_per_class'])
-        
-        # Log confusion matrix
+        results['single_head'] = metrics
         comet.log_confusion_matrix(matrix=confusion_matrix, labels=[str(c) for c in class_labels])
-        
-        # Save confusion matrix
-        cm_df = pd.DataFrame(confusion_matrix, columns=class_labels, index=class_labels)
-        cm_df.to_csv(f'{save_dir}/confusion_matrix_head_{i}.csv')
-        
-        # Store results
-        results[f'head_{i}'] = metrics
     
-    # Save class distribution summary
-    class_summary = class_tracker.get_samples_by_class()
-    print(f"\nFinal class distribution: {class_summary}")
+    # Save results with numpy type conversion
+    import json
     
-    # Save summary to file
+    def convert_numpy_types(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: convert_numpy_types(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_types(item) for item in obj]
+        elif isinstance(obj, set):
+            return [convert_numpy_types(item) for item in obj]
+        else:
+            return obj
+    
     summary_data = {
-        'all_classes': all_classes,
-        'class_distribution': class_summary,
-        'test_results': results
+        'all_classes': convert_numpy_types(all_classes),
+        'class_distribution': {
+            'tracked_samples': len(class_tracker.sample_classes),
+            'found_classes': convert_numpy_types(list(class_tracker.all_classes))
+        },
+        'test_results': convert_numpy_types(results),
+        'model_type': 'multi_head' if n_heads > 1 else 'single_head',
+        'n_heads': n_heads
     }
     
-    import json
     with open(f'{save_dir}/test_summary.json', 'w') as f:
         json.dump(summary_data, f, indent=2)
     

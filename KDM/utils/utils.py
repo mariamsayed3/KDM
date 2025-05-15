@@ -17,7 +17,7 @@ from PIL import Image
 from torch.autograd import Variable
 from sklearn.metrics import confusion_matrix as sklearn_confusion_matrix
 import torch.nn.functional as F
-
+from utils.metrics import DynamicClassMetrics
 # Local application imports
 from tqdm import tqdm
 

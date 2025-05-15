@@ -10,7 +10,7 @@ gpu_id: [0]
 
 train_params:
   dataset: 'spatial_transcriptomics'
-  dataset_dir: 'C:/Users/maria/Documents/Masters_24/New_Models/KDM_Model/KDM/bioDataset3'  # Update this path
+  dataset_dir: '/content/KDM/KDM/bioDataset3'  # Update this path
   batch_size: 16
   n_epochs: 150
   num_workers: 4
@@ -19,25 +19,24 @@ train_params:
   ignore_index: 0
   add_cm_labels: 1  # Show confusion matrix labels
 
-model_params:
-  name: 'SGR_Net'  # or your teacher model name
+model_params:[in case of dingle head]
+  name: 'HSINet'  # Simple single-head model
   n_bands: 136  # Number of gene expression features
-  classes: null  # Auto-detect classes (or specify [1, 2, 3, 4, 5] if known)
-  n_heads: 5  # Multiple heads for progressive learning
-  nf_enc: [64, 128, 256, 512, 1024]  # Encoder features
-  nf_dec: [64, 32, 32, 16, 16, 8]    # Decoder features  
+  classes: [1,2,3,4,5,6]  # Total classes [0, 1, 2, 3, 4, 5]
+  
+  # HSINet parameters (remove n_heads, encoder_name)
+  nf_enc: [64, 128, 256, 512]  # Reduced for stability
+  nf_dec: [64, 32, 32, 16, 16, 8] # 6 layers (must be > nf_enc)
   do_batchnorm: true
-  encoder_name: 'resnet50'
+  
+  # Remove these - HSINet doesn't use them:
+  # n_heads: 5  
+  # encoder_name: 'resnet50'
   
   # Loss weights for SpatialTranscriptomicsLoss
   ce_weight: 1.0
   dice_weight: 0.5
   focal_weight: 0.3
-  
-  # Knowledge distillation weights (for multi-head training)
-  feat_weight: 0.5
-  resp_weight: 0.5
-  student_weight: 1.0
   
   ignore_index: 0
 
