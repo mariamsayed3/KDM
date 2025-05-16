@@ -230,8 +230,30 @@ class KnowledgeDistillationLoss(nn.Module):
 
     @staticmethod
     def _scale_target(targets_, scaled_size):
-        targets = targets_.clone().unsqueeze(1).float()
-        targets = func.interpolate(targets, size=scaled_size, mode='nearest')
+        """Scale target tensor to match output size, handling different input shapes"""
+        targets = targets_.clone().float()
+        
+        # Handle different input shapes
+        if targets.dim() == 2:  # [H, W]
+            targets = targets.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        elif targets.dim() == 3:  # [B, H, W] or [1, H, W]
+            if targets.size(0) == 1:  # [1, H, W] - single sample
+                targets = targets.unsqueeze(0)  # [1, 1, H, W]
+            else:  # [B, H, W] - batch of samples
+                targets = targets.unsqueeze(1)  # [B, 1, H, W]
+        elif targets.dim() == 4:  # [B, C, H, W]
+            if targets.size(1) > 1:  # Multi-channel, likely one-hot
+                # Convert one-hot to class indices
+                targets = torch.argmax(targets, dim=1, keepdim=True)
+            # else: already in [B, 1, H, W] format
+        else:
+            raise ValueError(f"Unexpected target tensor dimensions: {targets.shape}")
+        
+        # Interpolate if needed
+        current_size = (targets.size(-2), targets.size(-1))
+        if current_size != scaled_size:
+            targets = func.interpolate(targets, size=scaled_size, mode='nearest')
+        
         return targets.squeeze(1).long()
 
     def forward(self, student_output, teacher_output, student_feat, teacher_feat, output):
@@ -308,15 +330,54 @@ class KDFeat(nn.Module):
         f_T - teacher feature map  
         target - ground truth for masking (optional)
         """
+        # Store original spatial dimensions before any reshaping
+        orig_h, orig_w = None, None
+        
+        # Handle different feature dimensions
+        if f_S.dim() == 2:  # [B, C] - flattened features
+            # Reshape to 4D assuming square feature maps
+            batch_size, channels = f_S.shape
+            # Try to infer spatial dimensions from teacher if available
+            if f_T.dim() == 4:
+                h, w = f_T.shape[2], f_T.shape[3]
+                # Reshape student features to match teacher spatial dimensions
+                f_S = f_S.view(batch_size, channels, 1, 1)
+                f_S = func.interpolate(f_S, size=(h, w), mode='nearest')
+            else:
+                # Default to 1x1 spatial dimensions
+                f_S = f_S.view(batch_size, channels, 1, 1)
+        
+        # Ensure both features have 4D shape
+        if f_T.dim() == 2:
+            batch_size, channels = f_T.shape
+            f_T = f_T.view(batch_size, channels, 1, 1)
+        
+        # Store spatial dimensions before any processing
+        if f_S.dim() == 4:
+            orig_h, orig_w = f_S.shape[2], f_S.shape[3]
+        
         # Ensure same size
         if f_S.size() != f_T.size():
             f_T = func.interpolate(f_T, size=(f_S.shape[2], f_S.shape[3]), mode='bilinear', align_corners=True)
         
-        # Calculate attention maps
-        f_S = torch.sum(f_S * f_S, dim=1, keepdim=True)
-        f_S = SpatialSoftmax(f_S)
-        f_T = torch.sum(f_T * f_T, dim=1, keepdim=True)
-        f_T = SpatialSoftmax(f_T)
+        # Calculate attention maps only if spatial dimensions exist
+        if f_S.shape[2] > 1 or f_S.shape[3] > 1:
+            # Calculate attention maps
+            f_S_attention = torch.sum(f_S * f_S, dim=1, keepdim=True)
+            f_S_attention = SpatialSoftmax(f_S_attention)
+            f_T_attention = torch.sum(f_T * f_T, dim=1, keepdim=True)
+            f_T_attention = SpatialSoftmax(f_T_attention)
+            
+            # Reshape back to spatial format for target masking
+            # SpatialSoftmax converts [B, 1, H, W] -> [B, 1, H*W]
+            # We need to convert back to [B, 1, H, W]
+            if orig_h is not None and orig_w is not None:
+                f_S_attention = f_S_attention.view(f_S_attention.shape[0], f_S_attention.shape[1], orig_h, orig_w)
+                f_T_attention = f_T_attention.view(f_T_attention.shape[0], f_T_attention.shape[1], orig_h, orig_w)
+        else:
+            # For 1x1 features, just use the features directly
+            f_S_attention = torch.mean(f_S, dim=1, keepdim=True)
+            f_T_attention = torch.mean(f_T, dim=1, keepdim=True)
         
         # Apply ignore mask if target is provided
         if target is not None:
@@ -325,7 +386,7 @@ class KDFeat(nn.Module):
             # Resize target to match feature size
             target_resized = func.interpolate(
                 target.unsqueeze(1).float(), 
-                size=(f_S.shape[2], f_S.shape[3]), 
+                size=(f_S_attention.shape[2], f_S_attention.shape[3]), 
                 mode='nearest'
             ).squeeze(1).long()
             
@@ -333,13 +394,11 @@ class KDFeat(nn.Module):
             valid_mask = (target_resized != self.ignore_label).unsqueeze(1).float()
             
             # Apply mask
-            f_S = f_S * valid_mask
-            f_T = f_T * valid_mask
+            f_S_attention = f_S_attention * valid_mask
+            f_T_attention = f_T_attention * valid_mask
         
-        loss = self.criterion(f_S, f_T)
+        loss = self.criterion(f_S_attention, f_T_attention)
         return loss
-
-
 class ECELoss(nn.Module):
     """
     Calculates the Expected Calibration Error of a model.

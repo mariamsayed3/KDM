@@ -439,10 +439,75 @@ def compute_confusion_matrix_dynamic(y_gt, y_pr, all_possible_classes=None, igno
     
     return cm, all_possible_classes
 
+## old version without extra evaluation
+# def compute_eval_from_cm_robust(confusion_matrix, class_names=None):
+#     """
+#     Calculate performance metrics with robust handling of missing classes
+#     :param confusion_matrix: confusion matrix
+#     :param class_names: optional list of class names for better reporting
+#     :return: metrics dictionary
+#     """
+#     # Add small epsilon to avoid division by zero
+#     eps = 1e-10
+    
+#     # Calculate pixel accuracy
+#     pixel_acc = np.trace(confusion_matrix) / (np.sum(confusion_matrix) + eps)
+    
+#     # Calculate per-class accuracy
+#     per_class_acc = np.diag(confusion_matrix) / (np.sum(confusion_matrix, axis=1) + eps)
+#     mean_acc = np.nanmean(per_class_acc)
+    
+#     # Calculate IoU for each class
+#     true_positives = np.diag(confusion_matrix)
+#     false_positives = np.sum(confusion_matrix, axis=0) - true_positives
+#     false_negatives = np.sum(confusion_matrix, axis=1) - true_positives
+    
+#     IoU_array = true_positives / (true_positives + false_positives + false_negatives + eps)
+#     mean_IoU = np.nanmean(IoU_array)
+    
+#     # Calculate Dice coefficient
+#     dice_array = (2 * true_positives) / (2 * true_positives + false_positives + false_negatives + eps)
+#     mean_dice = np.nanmean(dice_array)
+    
+#     # Calculate F1 score
+#     precision = true_positives / (true_positives + false_positives + eps)
+#     recall = true_positives / (true_positives + false_negatives + eps)
+#     f1_array = 2 * (precision * recall) / (precision + recall + eps)
+#     mean_f1 = np.nanmean(f1_array)
+    
+#     # Calculate Cohen's Kappa
+#     total_sum = np.sum(confusion_matrix)
+#     observed_accuracy = np.trace(confusion_matrix) / total_sum
+#     expected_accuracy = (np.sum(confusion_matrix, axis=0) / total_sum) @ (np.sum(confusion_matrix, axis=1) / total_sum)
+#     kappa = (observed_accuracy - expected_accuracy) / (1 - expected_accuracy + eps)
+    
+#     # Create results dictionary
+#     results = {
+#         'pixel_accuracy': pixel_acc,
+#         'mean_accuracy': mean_acc,
+#         'per_class_accuracy': per_class_acc,
+#         'mean_IoU': mean_IoU,
+#         'IoU_per_class': IoU_array,
+#         'mean_dice': mean_dice,
+#         'dice_per_class': dice_array,
+#         'mean_f1': mean_f1,
+#         'f1_per_class': f1_array,
+#         'precision_per_class': precision,
+#         'recall_per_class': recall,
+#         'kappa': kappa
+#     }
+    
+#     # Add class names if provided
+#     if class_names is not None:
+#         for metric in ['per_class_accuracy', 'IoU_per_class', 'dice_per_class', 'f1_per_class', 'precision_per_class', 'recall_per_class']:
+#             results[f'{metric}_named'] = dict(zip(class_names, results[metric]))
+    
+#     return results
 
 def compute_eval_from_cm_robust(confusion_matrix, class_names=None):
     """
     Calculate performance metrics with robust handling of missing classes
+    Includes both micro and macro averaged metrics
     :param confusion_matrix: confusion matrix
     :param class_names: optional list of class names for better reporting
     :return: metrics dictionary
@@ -450,30 +515,43 @@ def compute_eval_from_cm_robust(confusion_matrix, class_names=None):
     # Add small epsilon to avoid division by zero
     eps = 1e-10
     
-    # Calculate pixel accuracy
+    # Calculate pixel accuracy (same as micro accuracy)
     pixel_acc = np.trace(confusion_matrix) / (np.sum(confusion_matrix) + eps)
     
-    # Calculate per-class accuracy
+    # Calculate per-class accuracy (for macro accuracy)
     per_class_acc = np.diag(confusion_matrix) / (np.sum(confusion_matrix, axis=1) + eps)
-    mean_acc = np.nanmean(per_class_acc)
+    macro_acc = np.nanmean(per_class_acc)
     
     # Calculate IoU for each class
     true_positives = np.diag(confusion_matrix)
     false_positives = np.sum(confusion_matrix, axis=0) - true_positives
     false_negatives = np.sum(confusion_matrix, axis=1) - true_positives
     
+    # Per-class IoU (macro)
     IoU_array = true_positives / (true_positives + false_positives + false_negatives + eps)
-    mean_IoU = np.nanmean(IoU_array)
+    macro_IoU = np.nanmean(IoU_array)
     
-    # Calculate Dice coefficient
+    # Calculate per-class precision, recall, f1
+    precision_array = true_positives / (true_positives + false_positives + eps)
+    recall_array = true_positives / (true_positives + false_negatives + eps)
+    f1_array = 2 * (precision_array * recall_array) / (precision_array + recall_array + eps)
+    
+    # Macro averages
+    macro_precision = np.nanmean(precision_array)
+    macro_recall = np.nanmean(recall_array)
+    macro_f1 = np.nanmean(f1_array)
+    
+    # Micro averages
+    micro_precision = np.sum(true_positives) / (np.sum(true_positives) + np.sum(false_positives) + eps)
+    micro_recall = np.sum(true_positives) / (np.sum(true_positives) + np.sum(false_negatives) + eps)
+    micro_f1 = 2 * (micro_precision * micro_recall) / (micro_precision + micro_recall + eps)
+    
+    # Calculate Dice coefficient (macro)
     dice_array = (2 * true_positives) / (2 * true_positives + false_positives + false_negatives + eps)
-    mean_dice = np.nanmean(dice_array)
+    macro_dice = np.nanmean(dice_array)
     
-    # Calculate F1 score
-    precision = true_positives / (true_positives + false_positives + eps)
-    recall = true_positives / (true_positives + false_negatives + eps)
-    f1_array = 2 * (precision * recall) / (precision + recall + eps)
-    mean_f1 = np.nanmean(f1_array)
+    # Micro Dice (equivalent to micro F1)
+    micro_dice = micro_f1
     
     # Calculate Cohen's Kappa
     total_sum = np.sum(confusion_matrix)
@@ -483,17 +561,39 @@ def compute_eval_from_cm_robust(confusion_matrix, class_names=None):
     
     # Create results dictionary
     results = {
+        # Accuracy metrics
         'pixel_accuracy': pixel_acc,
-        'mean_accuracy': mean_acc,
+        'micro_accuracy': pixel_acc,  # Same as pixel accuracy
+        'macro_accuracy': macro_acc,
         'per_class_accuracy': per_class_acc,
-        'mean_IoU': mean_IoU,
+        
+        # IoU metrics
+        'macro_IoU': macro_IoU,
+        'mean_IoU': macro_IoU,  # Alias for backward compatibility
         'IoU_per_class': IoU_array,
-        'mean_dice': mean_dice,
-        'dice_per_class': dice_array,
-        'mean_f1': mean_f1,
+        
+        # Precision metrics
+        'macro_precision': macro_precision,
+        'micro_precision': micro_precision,
+        'precision_per_class': precision_array,
+        
+        # Recall metrics
+        'macro_recall': macro_recall,
+        'micro_recall': micro_recall,
+        'recall_per_class': recall_array,
+        
+        # F1 metrics
+        'macro_f1': macro_f1,
+        'micro_f1': micro_f1,
         'f1_per_class': f1_array,
-        'precision_per_class': precision,
-        'recall_per_class': recall,
+        
+        # Dice metrics
+        'macro_dice': macro_dice,
+        'mean_dice': macro_dice,  # Alias for backward compatibility
+        'micro_dice': micro_dice,
+        'dice_per_class': dice_array,
+        
+        # Other metrics
         'kappa': kappa
     }
     
@@ -503,8 +603,6 @@ def compute_eval_from_cm_robust(confusion_matrix, class_names=None):
             results[f'{metric}_named'] = dict(zip(class_names, results[metric]))
     
     return results
-
-
 def show_visual_results_dynamic(x, y_gt, y_pr, available_classes, all_classes=None,
                                show_visual=False, comet=None, fig_name="", ignore_index=0):
     """

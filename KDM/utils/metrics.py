@@ -185,6 +185,10 @@ class MeanIoU(base.Metric):
     def forward(self, y_pr, y_gt, mask=True):
         y_pr = self.activation(y_pr)
         
+        # Ensure y_gt has the same number of dimensions as pred will have
+        if y_gt.dim() == 4 and y_gt.size(1) == 1:
+            y_gt = y_gt.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+        
         # Apply ignore logic
         if mask:
             y_pr[:, self.ignore_index] = 0
@@ -229,6 +233,10 @@ class IoU(base.Metric):
 
 
 def iou(pred, target, mask=True, ignore_index=0, classes=[1, 2, 3, 4, 5]):
+    # Ensure target has the same number of dimensions as pred will have
+    if target.dim() == 4 and target.size(1) == 1:
+        target = target.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+    
     if mask:
         pred[:, ignore_index] = 0
     pred = torch.argmax(pred, dim=1)
@@ -267,6 +275,11 @@ class MacroIoU(base.Metric):
 
     def forward(self, y_pr, y_gt, mask=True):
         y_pr = self.activation(y_pr)
+        
+        # Ensure y_gt has the same number of dimensions as pred will have
+        if y_gt.dim() == 4 and y_gt.size(1) == 1:
+            y_gt = y_gt.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+        
         if mask:
             y_pr[:, self.ignore_index] = 0
         pred = torch.argmax(y_pr, dim=1)
@@ -322,6 +335,11 @@ class Accuracy(base.Metric):
 
     def forward(self, y_pr, y_gt, mask=True):
         y_pr = self.activation(y_pr)
+        
+        # Ensure y_gt has the same number of dimensions as pred will have
+        if y_gt.dim() == 4 and y_gt.size(1) == 1:
+            y_gt = y_gt.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+        
         if mask:
             y_pr[:, self.ignore_index] = 0
         pred = torch.argmax(y_pr, dim=1)
@@ -408,6 +426,11 @@ class Dice(base.Metric):
 
     def forward(self, y_pr, y_gt, mask=True):
         y_pr = self.activation(y_pr)
+        
+        # Ensure y_gt has the same number of dimensions as pred will have
+        if y_gt.dim() == 4 and y_gt.size(1) == 1:
+            y_gt = y_gt.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+        
         if mask:
             y_pr[:, self.ignore_index] = 0
         y_pr = torch.argmax(y_pr, dim=1)
@@ -433,6 +456,10 @@ class Dice(base.Metric):
 
 # Standalone functions
 def accuracy(pred, target, mask=True, ignore_index=0, classes=[1, 2, 3, 4, 5]):
+    # Ensure target has the same number of dimensions as pred will have
+    if target.dim() == 4 and target.size(1) == 1:
+        target = target.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+    
     if mask:
         pred[:, ignore_index] = 0
     pred = torch.argmax(pred, dim=1)
@@ -455,6 +482,10 @@ def accuracy(pred, target, mask=True, ignore_index=0, classes=[1, 2, 3, 4, 5]):
 
 
 def dice_coeff(pred, target, mask=True, ignore_index=0, classes=[1, 2, 3, 4, 5]):
+    # Ensure target has the same number of dimensions as pred will have
+    if target.dim() == 4 and target.size(1) == 1:
+        target = target.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+    
     if mask:
         pred[:, ignore_index] = 0
     pred = torch.argmax(pred, dim=1)
@@ -481,6 +512,10 @@ def dice_coeff(pred, target, mask=True, ignore_index=0, classes=[1, 2, 3, 4, 5])
 
 
 def average_accuracy(pred, target, mask=True, ignore_index=0, classes=[1, 2, 3, 4, 5]):
+    # Ensure target has the same number of dimensions as pred will have
+    if target.dim() == 4 and target.size(1) == 1:
+        target = target.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+    
     if mask:
         pred[:, ignore_index] = 0
     pred = torch.argmax(pred, dim=1)
@@ -507,6 +542,10 @@ def average_accuracy(pred, target, mask=True, ignore_index=0, classes=[1, 2, 3, 
 
 
 def kappa(pred, target, mask=True, ignore_index=0, classes=[1, 2, 3, 4, 5]):
+    # Ensure target has the same number of dimensions as pred will have
+    if target.dim() == 4 and target.size(1) == 1:
+        target = target.squeeze(1)  # [B, 1, H, W] -> [B, H, W]
+    
     if mask:
         pred[:, ignore_index] = 0
     pred = torch.argmax(pred, dim=1)

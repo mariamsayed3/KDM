@@ -1,55 +1,45 @@
-# spatial_transcriptomics_blkd.yml  
-# Configuration for block knowledge distillation
-
 name: 'spatial_transcriptomics_blkd'
 seed: 42
 
-# Global parameters
 dataset: 'spatial_transcriptomics'
 gpu_id: [0]
 
 train_params:
   dataset: 'spatial_transcriptomics'
-  dataset_dir: 'C:/Users/maria/Documents/Masters_24/New_Models/KDM_Model/KDM/bioDataset3'  # Update this path
+  dataset_dir: '/content/KDM/KDM/bioDataset3'
+  ##distillation_mode: 'block'  # Progressive head selection
+  distillation_mode: 'best_only'  # Always use the last/best head
   batch_size: 16
-  n_epochs: 100  # Will be divided by n_heads for progressive training
+  n_epochs: 100
   num_workers: 4
-  save_dir: ''  # Will be auto-generated with timestamp
-  early_stop: 25
+  save_dir: ''
+  early_stop: 20
   ignore_index: 0
 
-# Teacher model configuration (multi-head, pre-trained)
 teacher_params:
-  name: 'SGR_Net'  # Multi-head teacher
+  name: 'Res_SGR_Net'  # Same as your successful teacher
   n_bands: 136
-  classes: null  # Auto-detect classes
-  n_heads: 5  # Number of heads for block distillation
-  nf_enc: [64, 128, 256, 512, 1024]
-  nf_dec: [64, 32, 32, 16, 16, 8]
+  classes: [0, 1, 2, 3, 4, 5]
+  n_heads: 5
+  encoder_name: 'resnet50'  # Same as successful teacher
+  
+  # IMPORTANT: Use exact same channel progression as successful teacher
+  nf_enc: [64, 256, 512, 1024, 2048]  # ResNet50 channels
+  nf_dec: [1024, 512, 256, 128, 64, 32]  # Proper decoder progression
+  
   do_batchnorm: true
-  encoder_name: 'resnet50'
-  rates: [1, 2, 3, 4]  # Dilation rates for SGR_Net
-  
-  # Path to pre-trained multi-head teacher
-  pretrained_file: 'experiments/spatial_transcriptomics_teacher-[timestamp]/best_model.pth'
-  
-  ignore_index: 0
+  pretrained_file: 'experiments/spatial_transcriptomics_res_sgr-teacher-20250515-192311/best_model.pth'
 
-# Student model configuration (single head)
 student_params:
-  name: 'HSINet'  # Single-head student
+  name: 'HSINet'  # Simple student
   n_bands: 136
-  classes: null  # Auto-detect classes
-  nf_enc: [32, 64, 128, 256]  # Smaller than teacher
-  nf_dec: [32, 32, 16, 16, 8, 8]
+  classes: [0, 1, 2, 3, 4, 5]
+  nf_enc: [32, 64, 128, 256]      # Much smaller than teacher
+  nf_dec: [32, 16, 16, 8, 8, 4]   # Much smaller than teacher
   do_batchnorm: true
-  
-  # Block knowledge distillation weights
-  feat_weight: 0.5     # Feature distillation weight
-  resp_weight: 0.5     # Response distillation weight
-  temperature: 3.0     # Slightly lower temperature for block KD
-  
-  ignore_index: 0
+  feat_weight: 0.5
+  resp_weight: 0.5
+  temperature: 3.0
 
 optimizer:
   type: 'Adam'
@@ -57,16 +47,11 @@ optimizer:
     lr: 0.0001
     weight_decay: 0.00001
 
-# Block knowledge distillation loss
-loss: 'KnowledgeDistillationLoss'  # Supports progressive head distillation
-
-# Metrics with auto-class detection
+loss: 'KnowledgeDistillationLoss'
 metric: 'MeanIoU'
-
-# Resume training if needed
 resume: false
 
-tags:
+tags: 
   - 'spatial_transcriptomics'
   - 'block_knowledge_distillation'
-  - 'progressive_learning'
+  - 'student'

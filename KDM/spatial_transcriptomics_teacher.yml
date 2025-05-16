@@ -1,43 +1,37 @@
-# spatial_transcriptomics_teacher.yml
-# Configuration for training the teacher model
-
-name: 'spatial_transcriptomics_teacher'
+name: 'spatial_transcriptomics_res_sgr'
 seed: 42
 
-# Global parameters
 dataset: 'spatial_transcriptomics'
 gpu_id: [0]
 
 train_params:
   dataset: 'spatial_transcriptomics'
-  dataset_dir: '/content/KDM/KDM/bioDataset3'  # Update this path
+  dataset_dir: '/content/KDM/KDM/bioDataset3'
   batch_size: 16
   n_epochs: 150
   num_workers: 4
-  save_dir: ''  # Will be auto-generated with timestamp
+  save_dir: ''
   early_stop: 30
   ignore_index: 0
-  add_cm_labels: 1  # Show confusion matrix labels
 
-model_params:[in case of dingle head]
-  name: 'HSINet'  # Simple single-head model
-  n_bands: 136  # Number of gene expression features
-  classes: [1,2,3,4,5,6]  # Total classes [0, 1, 2, 3, 4, 5]
+model_params:
+  name: 'Res_SGR_Net'
+  n_bands: 136
+  classes: [0, 1, 2, 3, 4, 5]
+  n_heads: 5
+  encoder_name: 'resnet50'
   
-  # HSINet parameters (remove n_heads, encoder_name)
-  nf_enc: [64, 128, 256, 512]  # Reduced for stability
-  nf_dec: [64, 32, 32, 16, 16, 8] # 6 layers (must be > nf_enc)
+  # IMPORTANT: Match ResNet50's actual channel progression
+  nf_enc: [64, 256, 512, 1024, 2048]  # ResNet50 channels
+  nf_dec: [1024, 512, 256, 128, 64, 32]  # Proper decoder progression
+  
   do_batchnorm: true
-  
-  # Remove these - HSINet doesn't use them:
-  # n_heads: 5  
-  # encoder_name: 'resnet50'
-  
-  # Loss weights for SpatialTranscriptomicsLoss
   ce_weight: 1.0
   dice_weight: 0.5
   focal_weight: 0.3
-  
+  feat_weight: 0.5
+  resp_weight: 0.5
+  student_weight: 1.0
   ignore_index: 0
 
 optimizer:
@@ -46,16 +40,76 @@ optimizer:
     lr: 0.0001
     weight_decay: 0.00001
 
-# Use specialized loss for spatial transcriptomics
-loss: 'SpatialTranscriptomicsLoss'  # or 'KDLoss' for multi-head training
-
-# Metrics with auto-class detection
+loss: 'SpatialTranscriptomicsLoss'  # Multi-head progressive loss
 metric: 'MeanIoU'
-
-# Resume training if needed
 resume: false
 
 tags: 
   - 'spatial_transcriptomics'
-  - 'teacher'
+  - 'res_sgr_net'
   - 'multi_head'
+  - 'resnet_backbone'
+
+
+
+# # spatial_transcriptomics_teacher.yml
+# # Configuration for training the teacher model
+
+# name: 'spatial_transcriptomics_teacher'
+# seed: 42
+
+# # Global parameters
+# dataset: 'spatial_transcriptomics'
+# gpu_id: [0]
+
+# train_params:
+#   dataset: 'spatial_transcriptomics'
+#   dataset_dir: '/content/KDM/KDM/bioDataset3'  # Update this path
+#   batch_size: 16
+#   n_epochs: 150
+#   num_workers: 4
+#   save_dir: ''  # Will be auto-generated with timestamp
+#   early_stop: 30
+#   ignore_index: 0
+#   add_cm_labels: 1  # Show confusion matrix labels
+
+# model_params:[in case of dingle head]
+#   name: 'HSINet'  # Simple single-head model
+#   n_bands: 136  # Number of gene expression features
+#   classes: [1,2,3,4,5,6]  # Total classes [0, 1, 2, 3, 4, 5]
+  
+#   # HSINet parameters (remove n_heads, encoder_name)
+#   nf_enc: [64, 128, 256, 512]  # Reduced for stability
+#   nf_dec: [64, 32, 32, 16, 16, 8] # 6 layers (must be > nf_enc)
+#   do_batchnorm: true
+  
+#   # Remove these - HSINet doesn't use them:
+#   # n_heads: 5  
+#   # encoder_name: 'resnet50'
+  
+#   # Loss weights for SpatialTranscriptomicsLoss
+#   ce_weight: 1.0
+#   dice_weight: 0.5
+#   focal_weight: 0.3
+  
+#   ignore_index: 0
+
+# optimizer:
+#   type: 'Adam'
+#   args:
+#     lr: 0.0001
+#     weight_decay: 0.00001
+
+# # Use specialized loss for spatial transcriptomics
+# loss: 'SpatialTranscriptomicsLoss'  # or 'KDLoss' for multi-head training
+
+# # Metrics with auto-class detection
+# metric: 'MeanIoU'
+
+# # Resume training if needed
+# resume: false
+
+# tags: 
+#   - 'spatial_transcriptomics'
+#   - 'teacher'
+#   - 'multi_head'

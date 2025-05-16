@@ -112,14 +112,31 @@ def main(cfg, comet):
     comet.log_other('Teacher FLOPS', flops)
     comet.log_other('Teacher MACs', macs)
     
-    # Move models to GPU
+    # Move student to GPU with DataParallel
     student_model = torch.nn.DataParallel(student_model).cuda()
+
+    # Load pre-trained teacher BEFORE DataParallel wrapping
+    saved = torch.load(teacher_params['pretrained_file'], map_location=device)
+
+    # Clean the state dict of profiling artifacts and DataParallel prefixes
+    cleaned_state_dict = {}
+    for key, value in saved.items():
+        # Remove DataParallel prefix if present
+        if key.startswith('module.'):
+            new_key = key[7:]  # Remove 'module.' prefix
+        else:
+            new_key = key
+        
+        # Skip profiling artifacts
+        if not (new_key.endswith('.total_ops') or new_key.endswith('.total_params')):
+            cleaned_state_dict[new_key] = value
+
+    # Load cleaned state dict into teacher model
+    teacher_model.load_state_dict(cleaned_state_dict, strict=False)
+
+    # NOW wrap teacher with DataParallel and move to GPU
     teacher_model = torch.nn.DataParallel(teacher_model).cuda()
     teacher_model = teacher_model.to(device)
-    
-    # Load pre-trained teacher
-    saved = torch.load(teacher_params['pretrained_file'])
-    teacher_model.load_state_dict(saved)
     teacher_model.eval()  # Set teacher to eval mode
     
     # Define optimizer
@@ -184,7 +201,31 @@ def training_blkd_with_dynamic_classes(cfg, optimizer, student_model, teacher_mo
     train_cfg = cfg['train_params']
     n_epochs = train_cfg['n_epochs']
     n_networks = cfg['teacher_params']['n_heads']
-    resets = n_epochs // n_networks  # Switch teacher head every 'resets' epochs
+    
+    # Validate n_heads by testing teacher model
+    with torch.no_grad():
+        test_input = next(iter(train_loader))['input'][:1].to(device)
+        teacher_test_output = teacher_model(test_input)
+        
+        if isinstance(teacher_test_output, tuple) and len(teacher_test_output) == 2:
+            test_f, test_o = teacher_test_output
+            if isinstance(test_o, list):
+                actual_n_heads = len(test_o)
+                print(f"INFO: Teacher model has {actual_n_heads} heads")
+                if actual_n_heads != n_networks:
+                    print(f"WARNING: Config specifies {n_networks} heads but teacher has {actual_n_heads}")
+                    n_networks = actual_n_heads  # Use actual number of heads
+            else:
+                print(f"WARNING: Teacher model appears to be single-head")
+                n_networks = 1
+        else:
+            print(f"WARNING: Teacher model output format unexpected, treating as single-head")
+            n_networks = 1
+    
+    # Recalculate resets based on actual number of heads
+    resets = max(1, n_epochs // n_networks)  # Ensure at least 1 epoch per head
+    print(f"INFO: Using {n_networks} heads with {resets} epochs per head")
+    
     not_improved_epochs = 0
     
     # Initialize dynamic metrics
@@ -192,12 +233,40 @@ def training_blkd_with_dynamic_classes(cfg, optimizer, student_model, teacher_mo
     val_metrics = DynamicClassMetrics(ignore_index=0)
     
     for epoch in range(last_epoch, n_epochs):
-        # Determine which teacher head to use for distillation
-        teacher_head_id = epoch // resets
+        # Determine which teacher head to use based on distillation mode
+        distillation_mode = cfg.get('distillation_mode', 'block')  # Default to block KD
+        
+        if distillation_mode == 'single_head':
+            # Single Head KD: Always use the specified head
+            target_head = cfg.get('target_head', 4)  # Default to head 4 (best teacher)
+            teacher_head_id = min(target_head, n_networks - 1)  # Ensure within bounds
+            mode_description = f"Single Head KD (Head {teacher_head_id})"
+            
+        elif distillation_mode == 'block':
+            # Block KD: Progressive head selection (ORIGINAL BEHAVIOR)
+            teacher_head_id = min(epoch // resets, n_networks - 1)  # Ensure within bounds
+            mode_description = f"Block KD (Progressive Head {teacher_head_id + 1}/{n_networks})"
+            
+        elif distillation_mode == 'best_head':
+            # Always use the best head (last head, typically head 4)
+            teacher_head_id = n_networks - 1
+            mode_description = f"Best Head KD (Head {teacher_head_id})"
+            
+        elif distillation_mode == 'random':
+            # Random Head KD: Randomly select a head each epoch
+            import random
+            teacher_head_id = random.randint(0, n_networks - 1)
+            mode_description = f"Random Head KD (Head {teacher_head_id})"
+            
+        else:
+            # Default to block KD if mode not recognized
+            teacher_head_id = min(epoch // resets, n_networks - 1)
+            mode_description = f"Block KD (Default - Head {teacher_head_id + 1}/{n_networks})"
+        print(f"Warning: Unknown distillation_mode '{distillation_mode}', using block KD")
         print(f"\nTraining epoch {epoch + 1}/{n_epochs}")
+        print(f"Mode: {mode_description}")
         print(f"Using teacher head {teacher_head_id + 1}/{n_networks} for distillation")
         print("-----------------------------------")
-        
         # Reset metrics
         train_metrics.reset()
         val_metrics.reset()
@@ -268,7 +337,6 @@ def training_blkd_with_dynamic_classes(cfg, optimizer, student_model, teacher_mo
         lr = get_lr(optimizer)
         print(f"Learning rate: {lr}")
 
-
 def train_epoch_blkd(optimizer, student_model, teacher_model, teacher_head_id,
                     train_loader, loss_fn, metric, device, class_tracker, train_metrics):
     """Train one epoch with block knowledge distillation and dynamic classes"""
@@ -292,13 +360,47 @@ def train_epoch_blkd(optimizer, student_model, teacher_model, teacher_head_id,
         
         # Forward pass through teacher (returns multiple heads)
         with torch.no_grad():
-            teacher_f_list, teacher_o_list = teacher_model(x)
-            # Select the specific teacher head for this epoch
-            teacher_f = teacher_f_list[teacher_head_id] if isinstance(teacher_f_list, list) else teacher_f_list
-            teacher_o = teacher_o_list[teacher_head_id] if isinstance(teacher_o_list, list) else teacher_o_list
+            teacher_outputs = teacher_model(x)
+            
+            # Handle different teacher output formats
+            if isinstance(teacher_outputs, tuple) and len(teacher_outputs) == 2:
+                teacher_f_list, teacher_o_list = teacher_outputs
+                
+                # DEBUG: Print info about teacher outputs
+                if step == 0:
+                    print(f"DEBUG - Teacher outputs format: features={type(teacher_f_list)}, outputs={type(teacher_o_list)}")
+                    if isinstance(teacher_f_list, list):
+                        print(f"DEBUG - Number of feature heads: {len(teacher_f_list)}")
+                    if isinstance(teacher_o_list, list):
+                        print(f"DEBUG - Number of output heads: {len(teacher_o_list)}")
+                    print(f"DEBUG - Requested teacher_head_id: {teacher_head_id}")
+                
+                # Handle feature selection
+                if isinstance(teacher_f_list, list):
+                    if teacher_head_id < len(teacher_f_list):
+                        teacher_f = teacher_f_list[teacher_head_id]
+                    else:
+                        print(f"WARNING: teacher_head_id {teacher_head_id} >= len(teacher_f_list) {len(teacher_f_list)}")
+                        teacher_f = teacher_f_list[-1]  # Use last head as fallback
+                else:
+                    teacher_f = teacher_f_list
+                
+                # Handle output selection
+                if isinstance(teacher_o_list, list):
+                    if teacher_head_id < len(teacher_o_list):
+                        teacher_o = teacher_o_list[teacher_head_id]
+                    else:
+                        print(f"WARNING: teacher_head_id {teacher_head_id} >= len(teacher_o_list) {len(teacher_o_list)}")
+                        teacher_o = teacher_o_list[-1]  # Use last head as fallback
+                else:
+                    teacher_o = teacher_o_list
+            else:
+                # Single head teacher model
+                print(f"WARNING: Teacher model returned single output, treating as single-head model")
+                teacher_f, teacher_o = teacher_outputs if isinstance(teacher_outputs, tuple) else (None, teacher_outputs)
+                teacher_head_id = 0  # Reset to 0 for single head
         
         # Update class tracker
-        # Fix for both locations
         for i, sample_id in enumerate(sample_ids):
             # Handle tensor shape properly
             if y_seg.dim() == 4:  # [B, C, H, W]
@@ -308,6 +410,13 @@ def train_epoch_blkd(optimizer, student_model, teacher_model, teacher_head_id,
             else:
                 mask_data = y_seg.cpu().numpy()
             class_tracker.update(sample_id, mask_data)
+        
+        # Debug feature shapes
+        if step == 0:
+            print(f"DEBUG - Student features shape: {student_f.shape}")
+            print(f"DEBUG - Teacher features shape: {teacher_f.shape}")
+            print(f"DEBUG - Student output shape: {student_o.shape}")
+            print(f"DEBUG - Teacher output shape: {teacher_o.shape}")
         
         # Compute block knowledge distillation loss
         loss = loss_fn(student_o, teacher_o, student_f, teacher_f, y_seg)
@@ -355,13 +464,34 @@ def val_epoch_blkd(student_model, teacher_model, teacher_head_id, val_loader,
             student_f, student_o = student_model(x)
             
             # Forward pass through teacher
-            teacher_f_list, teacher_o_list = teacher_model(x)
-            # Select the specific teacher head
-            teacher_f = teacher_f_list[teacher_head_id] if isinstance(teacher_f_list, list) else teacher_f_list
-            teacher_o = teacher_o_list[teacher_head_id] if isinstance(teacher_o_list, list) else teacher_o_list
+            teacher_outputs = teacher_model(x)
+            
+            # Handle different teacher output formats
+            if isinstance(teacher_outputs, tuple) and len(teacher_outputs) == 2:
+                teacher_f_list, teacher_o_list = teacher_outputs
+                
+                # Handle feature selection with bounds checking
+                if isinstance(teacher_f_list, list):
+                    if teacher_head_id < len(teacher_f_list):
+                        teacher_f = teacher_f_list[teacher_head_id]
+                    else:
+                        teacher_f = teacher_f_list[-1]  # Use last head as fallback
+                else:
+                    teacher_f = teacher_f_list
+                
+                # Handle output selection with bounds checking
+                if isinstance(teacher_o_list, list):
+                    if teacher_head_id < len(teacher_o_list):
+                        teacher_o = teacher_o_list[teacher_head_id]
+                    else:
+                        teacher_o = teacher_o_list[-1]  # Use last head as fallback
+                else:
+                    teacher_o = teacher_o_list
+            else:
+                # Single head teacher model
+                teacher_f, teacher_o = teacher_outputs if isinstance(teacher_outputs, tuple) else (None, teacher_outputs)
             
             # Update class tracker
-            # Fix for both locations
             for i, sample_id in enumerate(sample_ids):
                 # Handle tensor shape properly
                 if y_seg.dim() == 4:  # [B, C, H, W]
@@ -392,6 +522,148 @@ def val_epoch_blkd(student_model, teacher_model, teacher_head_id, val_loader,
     avg_performance = running_performance / len(val_loader)
     
     return avg_loss, avg_performance
+## old version without extra metrices 
+# def testing_blkd_with_dynamic_classes(model, test_loader, metric, device, comet, 
+#                                     save_dir, class_tracker):
+#     """Test the block-distilled student model with dynamic class support"""
+#     vis_path = f'{save_dir}/visual'
+#     os.makedirs(vis_path, exist_ok=True)
+    
+#     # Initialize test metrics
+#     test_metrics = DynamicClassMetrics(ignore_index=0)
+    
+#     model.eval()
+#     pbar = tqdm(test_loader, ncols=80, desc='Testing')
+    
+#     all_predictions = []
+#     all_targets = []
+#     all_sample_ids = []
+    
+#     with torch.no_grad():
+#         for step, minibatch in enumerate(pbar):
+#             # Get batch data
+#             x = minibatch['input'].to(device)
+#             y_seg = minibatch['ground_truth_seg'].to(device) 
+#             y_oht = minibatch['ground_truth_onehot'].to(device)
+#             sample_id = minibatch.get('name', [f'test_{step}'])[0]
+            
+#             # Forward pass (student model has single output)
+#             _, o = model(x)
+            
+#             # Update class tracker and metrics
+#             # Handle batch processing properly
+#             batch_size = y_seg.size(0)
+#             for batch_idx in range(batch_size):
+#                 if y_seg.dim() == 4:
+#                     sample_mask = y_seg[batch_idx, 0].cpu().numpy()
+#                 else:
+#                     sample_mask = y_seg[batch_idx].cpu().numpy()
+                
+#                 batch_sample_id = f"{sample_id}_batch_{batch_idx}"
+#                 class_tracker.update(batch_sample_id, sample_mask)
+#             test_metrics.update(o, y_seg, [sample_id], probabilities=True)
+            
+#             # Store for final evaluation
+#             all_predictions.append(o.cpu())
+#             all_targets.append(y_seg.cpu())
+#             all_sample_ids.append(sample_id)
+            
+#             # Save visualizations for first few samples
+#             if step < 10:
+#                 test_loader.dataset.save_pred(y_oht, sv_path=vis_path, name=f'{sample_id}_gt.png')
+#                 test_loader.dataset.save_pred(o, sv_path=vis_path, name=f'{sample_id}_pred.png')
+                
+#                 # Save detailed visualization
+#                 show_visual_results_dynamic(
+#                     x=x.cpu().numpy(),
+#                     y_gt=y_seg.cpu().numpy(),
+#                     y_pr=o.cpu().numpy(),
+#                     available_classes=class_tracker.get_sample_classes(sample_id),
+#                     all_classes=class_tracker.get_all_classes(),
+#                     show_visual=False,
+#                     fig_name=f'{vis_path}/{sample_id}_detailed.png',
+#                     ignore_index=0
+#                 )
+    
+#     # Compute final metrics
+#     final_metrics = test_metrics.compute_metrics()
+#     class_summary = test_metrics.get_summary()
+    
+#     # Get all classes found
+#     all_classes = class_tracker.get_all_classes()
+    
+#     # Compute confusion matrix
+#     all_predictions = torch.cat(all_predictions, dim=0)
+#     all_targets = torch.cat(all_targets, dim=0)
+    
+#     confusion_matrix, class_labels = compute_confusion_matrix_dynamic(
+#         all_targets.numpy(),
+#         all_predictions.numpy(),
+#         all_possible_classes=all_classes,
+#         ignore_index=0
+#     )
+    
+#     # Compute comprehensive metrics
+#     comprehensive_metrics = compute_eval_from_cm_robust(
+#         confusion_matrix, 
+#         class_names=[f'class_{c}' for c in class_labels]
+#     )
+    
+#     # Print and log results
+#     print("\n" + "="*50)
+#     print("BLOCK KNOWLEDGE DISTILLATION TEST RESULTS")
+#     print("="*50)
+#     print(f"Mean IoU: {comprehensive_metrics['mean_IoU']:.4f}")
+#     print(f"Pixel Accuracy: {comprehensive_metrics['pixel_accuracy']:.4f}")
+#     print(f"Mean Accuracy: {comprehensive_metrics['mean_accuracy']:.4f}")
+#     print(f"Dice Score: {comprehensive_metrics['mean_dice']:.4f}")
+#     print(f"Kappa Score: {comprehensive_metrics['kappa']:.4f}")
+#     print(f"Classes found: {all_classes}")
+#     print(f"Total samples: {class_summary['total_samples']}")
+    
+#     # Log to comet
+#     comet.log_metric('test_mean_iou', comprehensive_metrics['mean_IoU'])
+#     comet.log_metric('test_pixel_accuracy', comprehensive_metrics['pixel_accuracy'])
+#     comet.log_metric('test_mean_accuracy', comprehensive_metrics['mean_accuracy'])
+#     comet.log_metric('test_dice', comprehensive_metrics['mean_dice'])
+#     comet.log_metric('test_kappa', comprehensive_metrics['kappa'])
+#     comet.log_metric('test_iou_array', comprehensive_metrics['IoU_per_class'])
+    
+#     # Log confusion matrix
+#     comet.log_confusion_matrix(matrix=confusion_matrix, labels=[str(c) for c in class_labels])
+    
+#         # Before line 440, add:
+#     import json
+
+#     def convert_numpy_types(obj):
+#             """Convert numpy types to Python native types for JSON serialization"""
+#             if isinstance(obj, np.integer):
+#                 return int(obj)
+#             elif isinstance(obj, np.floating):
+#                 return float(obj)
+#             elif isinstance(obj, np.ndarray):
+#                 return obj.tolist()
+#             elif isinstance(obj, dict):
+#                 return {key: convert_numpy_types(value) for key, value in obj.items()}
+#             elif isinstance(obj, list):
+#                 return [convert_numpy_types(item) for item in obj]
+#             elif isinstance(obj, set):
+#                 return [convert_numpy_types(item) for item in obj]
+#             else:
+#                 return obj
+
+#         # Then modify the save section:
+#     results_summary = {
+#             'metrics': convert_numpy_types(comprehensive_metrics),
+#             'class_summary': convert_numpy_types(class_summary),
+#             'all_classes': convert_numpy_types(all_classes),
+#             'method': 'block_knowledge_distillation'
+#         }
+    
+#     with open(f'{save_dir}/test_results.json', 'w') as f:
+#         json.dump(results_summary, f, indent=2)
+    
+#     return comprehensive_metrics
 
 
 def testing_blkd_with_dynamic_classes(model, test_loader, metric, device, comet, 
@@ -474,7 +746,7 @@ def testing_blkd_with_dynamic_classes(model, test_loader, metric, device, comet,
         ignore_index=0
     )
     
-    # Compute comprehensive metrics
+    # Compute comprehensive metrics (now includes micro/macro precision, recall, f1)
     comprehensive_metrics = compute_eval_from_cm_robust(
         confusion_matrix, 
         class_names=[f'class_{c}' for c in class_labels]
@@ -484,55 +756,93 @@ def testing_blkd_with_dynamic_classes(model, test_loader, metric, device, comet,
     print("\n" + "="*50)
     print("BLOCK KNOWLEDGE DISTILLATION TEST RESULTS")
     print("="*50)
-    print(f"Mean IoU: {comprehensive_metrics['mean_IoU']:.4f}")
-    print(f"Pixel Accuracy: {comprehensive_metrics['pixel_accuracy']:.4f}")
-    print(f"Mean Accuracy: {comprehensive_metrics['mean_accuracy']:.4f}")
-    print(f"Dice Score: {comprehensive_metrics['mean_dice']:.4f}")
+    print(f"Macro IoU: {comprehensive_metrics['macro_IoU']:.4f}")
+    print(f"Pixel Accuracy (Micro): {comprehensive_metrics['pixel_accuracy']:.4f}")
+    print(f"Macro Accuracy: {comprehensive_metrics['macro_accuracy']:.4f}")
+    print(f"Macro Dice: {comprehensive_metrics['macro_dice']:.4f}")
+    print(f"Micro Dice: {comprehensive_metrics['micro_dice']:.4f}")
     print(f"Kappa Score: {comprehensive_metrics['kappa']:.4f}")
+    print("\nPrecision/Recall/F1 Scores:")
+    print(f"  Macro - Precision: {comprehensive_metrics['macro_precision']:.4f}, "
+          f"Recall: {comprehensive_metrics['macro_recall']:.4f}, F1: {comprehensive_metrics['macro_f1']:.4f}")
+    print(f"  Micro - Precision: {comprehensive_metrics['micro_precision']:.4f}, "
+          f"Recall: {comprehensive_metrics['micro_recall']:.4f}, F1: {comprehensive_metrics['micro_f1']:.4f}")
     print(f"Classes found: {all_classes}")
     print(f"Total samples: {class_summary['total_samples']}")
     
-    # Log to comet
-    comet.log_metric('test_mean_iou', comprehensive_metrics['mean_IoU'])
+    # Log metrics to comet
+    # Main metrics
+    comet.log_metric('test_macro_iou', comprehensive_metrics['macro_IoU'])
     comet.log_metric('test_pixel_accuracy', comprehensive_metrics['pixel_accuracy'])
-    comet.log_metric('test_mean_accuracy', comprehensive_metrics['mean_accuracy'])
-    comet.log_metric('test_dice', comprehensive_metrics['mean_dice'])
+    comet.log_metric('test_macro_accuracy', comprehensive_metrics['macro_accuracy'])
+    comet.log_metric('test_macro_dice', comprehensive_metrics['macro_dice'])
+    comet.log_metric('test_micro_dice', comprehensive_metrics['micro_dice'])
     comet.log_metric('test_kappa', comprehensive_metrics['kappa'])
-    comet.log_metric('test_iou_array', comprehensive_metrics['IoU_per_class'])
+    
+    # Precision, Recall, F1 metrics
+    comet.log_metric('test_macro_precision', comprehensive_metrics['macro_precision'])
+    comet.log_metric('test_macro_recall', comprehensive_metrics['macro_recall'])
+    comet.log_metric('test_macro_f1', comprehensive_metrics['macro_f1'])
+    comet.log_metric('test_micro_precision', comprehensive_metrics['micro_precision'])
+    comet.log_metric('test_micro_recall', comprehensive_metrics['micro_recall'])
+    comet.log_metric('test_micro_f1', comprehensive_metrics['micro_f1'])
+    
+    # Per-class metrics
+    comet.log_metric('test_iou_per_class', comprehensive_metrics['IoU_per_class'])
+    comet.log_metric('test_precision_per_class', comprehensive_metrics['precision_per_class'])
+    comet.log_metric('test_recall_per_class', comprehensive_metrics['recall_per_class'])
+    comet.log_metric('test_f1_per_class', comprehensive_metrics['f1_per_class'])
     
     # Log confusion matrix
     comet.log_confusion_matrix(matrix=confusion_matrix, labels=[str(c) for c in class_labels])
     
-        # Before line 440, add:
-        import json
+    # Save confusion matrix to file
+    print(f"\nSaving confusion matrix to {save_dir}/confusion_matrix.npy")
+    np.save(f'{save_dir}/confusion_matrix.npy', confusion_matrix)
+    
+    # Save confusion matrix as CSV for readability
+    import pandas as pd
+    cm_df = pd.DataFrame(confusion_matrix, 
+                        index=[f'True_{c}' for c in class_labels],
+                        columns=[f'Pred_{c}' for c in class_labels])
+    cm_df.to_csv(f'{save_dir}/confusion_matrix.csv')
+    print(f"Confusion matrix also saved as CSV: {save_dir}/confusion_matrix.csv")
+    
+    # Convert numpy types for JSON serialization
+    import json
 
     def convert_numpy_types(obj):
-            """Convert numpy types to Python native types for JSON serialization"""
-            if isinstance(obj, np.integer):
-                return int(obj)
-            elif isinstance(obj, np.floating):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, dict):
-                return {key: convert_numpy_types(value) for key, value in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_numpy_types(item) for item in obj]
-            elif isinstance(obj, set):
-                return [convert_numpy_types(item) for item in obj]
-            else:
-                return obj
+        """Convert numpy types to Python native types for JSON serialization"""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: convert_numpy_types(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy_types(item) for item in obj]
+        elif isinstance(obj, set):
+            return [convert_numpy_types(item) for item in obj]
+        else:
+            return obj
 
-        # Then modify the save section:
+    # Create comprehensive results summary
     results_summary = {
-            'metrics': convert_numpy_types(comprehensive_metrics),
-            'class_summary': convert_numpy_types(class_summary),
-            'all_classes': convert_numpy_types(all_classes),
-            'method': 'block_knowledge_distillation'
-        }
+        'metrics': convert_numpy_types(comprehensive_metrics),
+        'class_summary': convert_numpy_types(class_summary),
+        'all_classes': convert_numpy_types(all_classes),
+        'confusion_matrix': convert_numpy_types(confusion_matrix),
+        'class_labels': convert_numpy_types(class_labels),
+        'method': 'block_knowledge_distillation'
+    }
     
+    # Save results to JSON
     with open(f'{save_dir}/test_results.json', 'w') as f:
         json.dump(results_summary, f, indent=2)
+    
+    print(f"\nAll results saved in {save_dir}/test_results.json")
     
     return comprehensive_metrics
 
